@@ -5,6 +5,9 @@ A Python/Tkinter application designed to intelligently organize camera uploads b
 ![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
+<img width="1758" height="912" alt="image" src="https://github.com/user-attachments/assets/25915220-70bb-4b04-a4b9-a4dfcc425ba3" />
+
+
 ## 📸 Features
 
 ### Core Functionality
