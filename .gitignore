@@ -49,3 +49,11 @@ DCIM/
 
 # Logs
 *.log
+
+# TriPhoto - sauvegarde des tags / tag backup
+triphoto_edits.json.bak
+
+# TriPhoto - dossiers temporaires créés dans le dossier photos
+# TriPhoto - temp folders created inside the photo folder
+\!temp/
+\!tempvideoscreen/

@@ -1,249 +1,264 @@
-# TriPhoto - Smart Photo & Video Organizer
+# TriPhoto — Smart Photo & Video Organizer
 
-A Python/Tkinter application designed to intelligently organize camera uploads by year and folder with advanced features like duplicate detection, video preview, and batch operations.
+Application de bureau (Python / Qt) pour ranger, dédoublonner et visualiser des milliers de photos et vidéos.
 
-![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
+A desktop app (Python / Qt) to sort, de-duplicate and browse thousands of photos and videos.
+
+![Python](https://img.shields.io/badge/python-3.9+-blue.svg)
+![Qt](https://img.shields.io/badge/UI-PySide6-41cd52.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
+![Platform](https://img.shields.io/badge/platform-Windows-lightgrey.svg)
 
-<img width="1758" height="912" alt="image" src="https://github.com/user-attachments/assets/25915220-70bb-4b04-a4b9-a4dfcc425ba3" />
-
-
-## 📸 Features
-
-### Core Functionality
-- **Automatic Year Detection**: Extracts year from filename (e.g., `IMG_20240815_143022.jpg` → 2024)
-- **Folder Organization**: Organize files into `YEAR/FOLDER_NAME/` structure
-- **Duplicate Detection**: Automatically moves duplicates to `!duplicate` folder
-- **Smart Categorization**: Auto-organize screenshots and screen recordings into dedicated folders
-
-### Advanced Features
-- **Video Preview**: Extract and navigate through video screenshots at key timestamps (0%, 10%, 15%, 25%, 30%, 50%, 65%, 75%, 85%, 95%, 100%)
-- **Interactive Slider**: Click points on timeline to preview different moments
-- **Image Viewer**: Built-in image viewer with zoom support (Ctrl+Scroll)
-- **HEIC Support**: Native support for Apple HEIC/HEIF images
-- **Batch Operations**: Select multiple files for bulk organization
-- **Color Coding**: Visual folder identification with auto-generated colors
-- **Live Preview**: See final path before applying changes
-- **Persistent Edits**: Auto-save work in progress, resume anytime
-
-### Duplicate Management
-- **Check Duplicates**: Scan organized folders for duplicate files
-- **Auto-Delete**: Automatically remove screenshot duplicates if file exists in organized folder
-- **Conflict Detection**: Identify files present in multiple organized folders
-- **Ignore List**: Maintain permanent ignore list for known duplicates
-
-## 🚀 Installation
-
-### Prerequisites
-- Python 3.8 or higher
-- FFmpeg (for video screenshot extraction)
-
-### Required Python Packages
-```bash
-pip install pillow pillow-heif send2trash
-```
-
-### FFmpeg Installation (Windows)
-1. Download from [gyan.dev/ffmpeg](https://www.gyan.dev/ffmpeg/builds/)
-2. Extract and add to PATH
-3. Verify: `ffmpeg -version`
-
-## 📁 Folder Structure
-
-```
-Camera Folder/
-├── YEAR (e.g., 2024)/
-│   ├── 2024-08-15 Vacation/
-│   │   ├── IMG_20240815_143022.jpg
-│   │   └── VID_20240815_160255.mp4
-│   ├── 2024-Cooking/
-│   ├── !Screenshots_2024/      (auto-organized)
-│   └── !ScreenRecorder_2024/   (auto-organized)
-├── 2025/
-│   └── ...
-├── !duplicate/                  (automatic duplicates)
-└── !tempvideoscreen/            (video preview cache)
-```
-
-## 🎯 Usage
-
-### Basic Workflow
-
-1. **Scan Camera Folder**
-   - Click `Browse` to select your camera uploads folder
-   - Click `Scan` to index all images and videos
-   - Duplicates automatically moved to `!duplicate`
-
-2. **Organize Files**
-   - Select file(s) in the main list
-   - Choose existing folder from the **Folders** listbox
-   - OR create new folder with custom name
-   - Preview shows final path: `\YEAR\FOLDER_NAME\filename.jpg`
-
-3. **Apply Changes**
-   - Review all changes in the list
-   - Click `✅ APPLY` to move files
-   - Files are moved with collision detection (auto-renames if needed)
-
-4. **Video Preview**
-   - Click on a video file
-   - Screenshots extracted automatically (cached for performance)
-   - Use slider to navigate through video timeline
-   - Click points at 0%, 10%, 15%, 25%, 30%, 50%, 65%, 75%, 85%, 95%, 100%
-
-### Auto-Organization
-
-**Screenshots & Screen Recordings**
-- Click `⚡ Auto Screenshots/Recorder`
-- Files containing "screenshot" → `!Screenshots_YEAR/`
-- Files containing "screen" + "recorder" → `!ScreenRecorder_YEAR/`
-
-### Duplicate Management
-
-**Check Duplicates**
-1. Click `🔍 Check Duplicates`
-2. **Auto-Delete**: Screenshot duplicates removed if file exists in organized folder
-3. **Conflicts**: Dialog shows files in multiple organized folders
-4. Options:
-   - `Ignore Selected`: Add to permanent ignore list
-   - `Open Folder`: Navigate to file location
-   - Manually delete unwanted copies
-
-### Keyboard Shortcuts
-
-| Shortcut | Action |
-|----------|--------|
-| `Delete` | Delete selected files (send to trash) |
-| `Ctrl+Scroll` | Zoom image in/out |
-| `↑↓` | Navigate files |
-| `Double-Click` | Edit year field (for files without date metadata) |
-
-## 🎨 Interface
-
-### Three-Panel Layout
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  [Camera Folder] [Browse] [Scan]                            │
-├──────────────────┬──────────────────┬────────────────────────┤
-│                  │                  │                        │
-│  📋 Files List   │  📁 Folders      │  🖼️ Preview           │
-│                  │                  │                        │
-│  • Filename      │  • 2024-Vacation │  [Image/Video]        │
-│  • Year          │  • 2024-Cooking  │                        │
-│  • Folder Name   │  • 2024-Work     │  [Video Slider]       │
-│  • Final Path    │                  │  0% ● ● ● 50% ● 100%  │
-│                  │  [Create New]    │                        │
-│  [Color coded    │  [✨ Create]     │                        │
-│   by folder]     │                  │                        │
-│                  │                  │                        │
-├──────────────────┴──────────────────┴────────────────────────┤
-│  [⚡ Auto] [🔍 Duplicates] [✅ APPLY] [🗑️ DELETE] [❌ Reset] │
-└─────────────────────────────────────────────────────────────┘
-```
-
-## ⚙️ Configuration Files
-
-All configuration files are stored next to the script:
-
-- `triphoto_config.json` - Camera folder path
-- `triphoto_edits.json` - Current editing session (auto-saved)
-- `triphoto_ignore.json` - Duplicate ignore list
-
-## 🎬 Video Preview Technical Details
-
-**Screenshot Extraction**
-- Uses FFmpeg/FFprobe
-- Extracts 11 frames at specific percentages
-- Cached in `!tempvideoscreen/` folder
-- Hash-based naming prevents re-extraction
-- Fallback to double-click playback if FFmpeg unavailable
-
-**Slider Points**
-- 0% - Start
-- 10%, 15%, 25%, 30% - Early moments
-- 50% - Middle
-- 65%, 75%, 85%, 95% - Later moments
-- 100% - End (t-0.5s to avoid black frame)
-
-## 🔧 Advanced Features
-
-### Color Coding
-- Each folder gets a unique pastel color (HSL-based)
-- Consistent across sessions (hash-based generation)
-- Visual grouping in file list
-- Colors assigned by **Folders listbox**, applied to TreeView
-
-### Edit Year Manually
-- Double-click on **Year** column
-- Useful for files without date metadata (e.g., `unnamed.jpg`)
-- Updates folder list and final path automatically
-
-### Persistent Editing
-- All edits auto-saved to `triphoto_edits.json`
-- Resume work after closing application
-- Deleted files removed from cache automatically
-
-## 🐛 Troubleshooting
-
-**Video preview not working**
-- Install FFmpeg and add to PATH
-- Check console for `[EXTRACT]` logs
-- Verify with: `ffmpeg -version`
-
-**HEIC images not showing**
-- Install: `pip install pillow-heif`
-- Restart application
-
-**Files not moving**
-- Check write permissions on destination folder
-- Review console for `[SCAN]` and `[DISPLAY]` logs
-- Verify folder structure matches expected format
-
-**Duplicates not detected**
-- Check filename exactly matches (case-sensitive)
-- Files must be in year folders (`2024/`, `2025/`, etc.)
-- Special folders (`!Screenshots_*`, `!ScreenRecorder_*`) are treated as screenshot folders
-
-## 📝 Logging
-
-Enable detailed logging by running from terminal:
-```bash
-python TriPhoto_v5.py
-```
-
-Log prefixes:
-- `[SCAN]` - File scanning operations
-- `[DISPLAY]` - Media display events
-- `[EXTRACT]` - Video screenshot extraction
-- `[SLIDER]` - Slider drawing and interactions
-- `[SLIDER-CLICK]` - Click events and image loading
-- `[DUPLICATES]` - Duplicate detection operations
-
-## 🤝 Contributing
-
-Contributions welcome! Please:
-1. Fork the repository
-2. Create a feature branch
-3. Commit your changes
-4. Push to the branch
-5. Open a Pull Request
-
-## 📄 License
-
-MIT License - feel free to use and modify for your needs.
-
-## 🙏 Acknowledgments
-
-- Built with Python & Tkinter
-- Video processing powered by FFmpeg
-- HEIC support via pillow-heif
-- Safe file deletion with send2trash
-
-## 📞 Support
-
-For issues, questions, or feature requests, please open an issue on GitHub.
+**[🇫🇷 Français](#-français) · [🇬🇧 English](#-english)**
 
 ---
 
-**Made with ❤️ for organizing thousands of camera photos and videos**
+# 🇫🇷 Français
+
+## Ce que fait TriPhoto
+
+Quatre onglets, une seule idée : reprendre le contrôle d'un dossier `DCIM/Camera` qui a débordé.
+
+| Onglet | Rôle |
+|---|---|
+| **1️⃣ Renommage** | Normalise les noms de dossiers d'événements et corrige ceux rangés dans la mauvaise année |
+| **2️⃣ Doublons** | Détecte les doublons, **compare le contenu réel** et n'en supprime aucun sans preuve |
+| **3️⃣ Tri des médias** | Assigne chaque photo/vidéo à un dossier d'année, avec aperçu instantané |
+| **4️⃣ Visualiseur** | Parcourt l'existant en vignettes, avec une frise chronologique interactive |
+
+## Points forts
+
+### Comparaison de contenu, pas seulement de nom
+
+Deux fichiers qui portent le même nom, ou un suffixe `_1`, ne sont pas forcément identiques. TriPhoto le vérifie sur trois critères :
+
+- ⚖️ **taille** des deux fichiers
+- 🖼️ **contenu affiché** — empreinte perceptuelle *dHash*, insensible au réencodage et au redimensionnement, sensible à un changement de scène
+- ⏱️ **durée** pour les vidéos
+
+Les vidéos sont comparées **image par image** aux mêmes points de leur timeline : une version tronquée ou une autre prise ressort immédiatement. Le verdict va de 🟢 *doublon confirmé* à 🔴 *contenu différent*, et **une ligne 🟠 ou 🔴 n'est jamais supprimée par le traitement automatique**, même si son nom crie « copie ».
+
+Le calcul tourne en tâche de fond : la colonne Score se remplit pendant que vous travaillez.
+
+### Détection de copies
+
+Reconnaît les marqueurs laissés par Windows, les téléphones et les outils de synchronisation : `_1`, `-1`, `~1`, `(1)`, ` (1)`, `- Copie`, `_copy`, `copy 2`, `kopie`, `copia`. L'original doit exister **dans le même dossier**, et les suffixes numériques sont limités à trois chiffres — `IMG_20190323_104548.jpg` n'est donc pas pris pour une copie.
+
+### Différences surlignées
+
+Les deux chemins d'un doublon sont comparés segment par segment, puis caractère par caractère quand ils se ressemblent. Seul ce qui diffère est surligné :
+
+```
+2024\!ScreenShots_2024\Screenshot_2024-04-13-10-12-33-965_mobi.lappli.jpg
+2024\!ScreenShots_2024\Screenshot_2024-04-13-10-12-33-965_mobi.lappli[_1].jpg
+                                                                     ^^^^
+```
+
+### Tri chronologique fiable
+
+La date est extraite du nom quel que soit le format (`IMG_20250108_181456`, `2016-03-09 19.37.29`, `Screenshot_2024-04-13-10-12-33-965`, horodatage epoch…), avec repli sur la date de modification. **Le préfixe est ignoré** : photos et vidéos d'un même moment se suivent au lieu d'être séparées en deux blocs.
+
+### Fluidité
+
+- décodage des images dans des threads dédiés, jamais dans l'interface
+- mode *draft* de libjpeg : décodage direct en taille réduite
+- préchargement des photos voisines — la suivante est déjà prête
+- vignettes du visualiseur chargées par un pool de 4 threads, avec cache mémoire
+- une seule image vidéo (25 %) préchargée ; les autres pourcentages à la demande
+
+### Frise chronologique
+
+Un point par média, avec des graduations qui s'adaptent à l'étendue du dossier (heures, jours, mois, années). Un interrupteur **vue année** étale la frise du 01/01 au 31/12 : on voit immédiatement si les photos se concentrent en début ou en fin d'année. Cliquer un point sélectionne la vignette, et inversement.
+
+## Installation
+
+```bash
+git clone https://github.com/soaresden/photoorganizer.git
+cd photoorganizer
+pip install -r requirements.txt
+python TriPhoto.py
+```
+
+Les dépendances manquantes sont installées automatiquement au premier lancement.
+
+### ffmpeg (aperçus vidéo)
+
+Recherché dans l'ordre : dossier configuré → dossier du script → `PATH` → paquet `imageio-ffmpeg`.
+
+```bash
+winget install Gyan.FFmpeg     # ou : pip install imageio-ffmpeg
+```
+
+Sans ffmpeg, tout fonctionne sauf les aperçus vidéo. Le chemin est modifiable via la clé `ffmpeg_dir` du fichier de configuration.
+
+## Structure attendue
+
+```
+Camera/
+├── 2024/
+│   ├── 2024-08-15 Vacances/
+│   ├── !Screenshots_2024/        (rangé automatiquement)
+│   └── !ScreenRecorder_2024/
+├── 2025/
+├── !duplicate/                   (doublons détectés au déplacement)
+├── !temp/                        (temporaire, vidé à la fermeture)
+└── !tempvideoscreen/             (temporaire, vidé à la fermeture)
+```
+
+## Raccourcis
+
+| Raccourci | Action |
+|---|---|
+| `Suppr` | Corbeille (onglets Doublons, Tri, Visualiseur) |
+| `F2` | Renommer le média sélectionné (Visualiseur) |
+| `Ctrl` + molette | Zoom de l'aperçu |
+| Double-clic | Ouvrir le fichier (Doublons, Visualiseur) |
+| Clic droit | Menu contextuel : renommer, ouvrir, corbeille, ignorer |
+
+## Sécurité des données
+
+- toute suppression passe par la **corbeille Windows**, jamais par un effacement direct ;
+- le fichier de tags ne peut pas rétrécir sans laisser une copie `.bak` ;
+- avant tout déplacement, les dossiers assignés sont resynchronisés depuis le tableau : **ce que vous voyez fait foi** ;
+- les doublons ignorés sont mémorisés **par paire de chemins**, pas par nom de fichier.
+
+## Fichiers de configuration
+
+Écrits à côté du script, ignorés par git :
+
+| Fichier | Contenu |
+|---|---|
+| `triphoto_config.json` | dossier Camera, chemin ffmpeg, largeur et tri des colonnes |
+| `triphoto_edits.json` | dossiers assignés, sauvegarde automatique |
+| `triphoto_ignore.json` | doublons ignorés |
+
+---
+
+# 🇬🇧 English
+
+## What TriPhoto does
+
+Four tabs, one goal: regain control of a `DCIM/Camera` folder that got out of hand.
+
+| Tab | Purpose |
+|---|---|
+| **1️⃣ Renaming** | Normalises event folder names and fixes those filed under the wrong year |
+| **2️⃣ Duplicates** | Finds duplicates, **compares actual content**, deletes nothing without proof |
+| **3️⃣ Media sorting** | Assigns every photo/video to a year folder, with instant preview |
+| **4️⃣ Viewer** | Browses what is already filed as thumbnails, with an interactive timeline |
+
+## Highlights
+
+### Content comparison, not just names
+
+Two files sharing a name — or one carrying a `_1` suffix — are not necessarily the same. TriPhoto checks three things:
+
+- ⚖️ **file size** on both sides
+- 🖼️ **displayed content** — a *dHash* perceptual fingerprint, immune to re-encoding and resizing, sensitive to a different scene
+- ⏱️ **duration** for videos
+
+Videos are compared **frame by frame** at matching points of their timeline, so a trimmed version or a different take stands out immediately. Verdicts run from 🟢 *confirmed duplicate* to 🔴 *different content*, and **a 🟠 or 🔴 row is never batch-deleted**, however loudly its name says "copy".
+
+Scoring runs in the background: the Score column fills itself while you work.
+
+### Copy detection
+
+Recognises the markers left by Windows, phones and sync tools: `_1`, `-1`, `~1`, `(1)`, ` (1)`, `- Copie`, `_copy`, `copy 2`, `kopie`, `copia`. The original must exist **in the same folder**, and numeric suffixes are capped at three digits — so `IMG_20190323_104548.jpg` is never mistaken for a copy.
+
+### Highlighted differences
+
+Both paths are compared segment by segment, then character by character when segments are similar. Only what actually differs is highlighted:
+
+```
+2024\!ScreenShots_2024\Screenshot_2024-04-13-10-12-33-965_mobi.lappli.jpg
+2024\!ScreenShots_2024\Screenshot_2024-04-13-10-12-33-965_mobi.lappli[_1].jpg
+                                                                     ^^^^
+```
+
+### Reliable chronological sorting
+
+Dates are read from the filename whatever the format (`IMG_20250108_181456`, `2016-03-09 19.37.29`, `Screenshot_2024-04-13-10-12-33-965`, epoch timestamps…), falling back to the file's modification time. **The prefix is ignored**, so photos and videos from the same moment sit next to each other instead of forming two separate blocks.
+
+### Responsiveness
+
+- images decoded in dedicated threads, never in the UI loop
+- libjpeg *draft* mode: decoding straight to reduced size
+- neighbouring photos prefetched — the next one is already decoded
+- viewer thumbnails loaded by a 4-thread pool, with an in-memory cache
+- a single video frame (25 %) prefetched; other percentages extracted on demand
+
+### Timeline
+
+One dot per media, with graduations that adapt to the folder's span (hours, days, months, years). A **year view** switch stretches the timeline from Jan 1st to Dec 31st, showing at a glance whether shots cluster early or late in the year. Clicking a dot selects the thumbnail, and vice versa.
+
+## Installation
+
+```bash
+git clone https://github.com/soaresden/photoorganizer.git
+cd photoorganizer
+pip install -r requirements.txt
+python TriPhoto.py
+```
+
+Missing dependencies are installed automatically on first run.
+
+### ffmpeg (video previews)
+
+Searched in order: configured folder → script folder → `PATH` → the `imageio-ffmpeg` package.
+
+```bash
+winget install Gyan.FFmpeg     # or: pip install imageio-ffmpeg
+```
+
+Without ffmpeg everything works except video previews. The path can be set through the `ffmpeg_dir` key of the config file.
+
+## Expected layout
+
+```
+Camera/
+├── 2024/
+│   ├── 2024-08-15 Holiday/
+│   ├── !Screenshots_2024/        (auto-filed)
+│   └── !ScreenRecorder_2024/
+├── 2025/
+├── !duplicate/                   (duplicates found while moving)
+├── !temp/                        (temporary, emptied on exit)
+└── !tempvideoscreen/             (temporary, emptied on exit)
+```
+
+## Shortcuts
+
+| Shortcut | Action |
+|---|---|
+| `Delete` | Recycle bin (Duplicates, Sorting, Viewer tabs) |
+| `F2` | Rename the selected media (Viewer) |
+| `Ctrl` + wheel | Zoom the preview |
+| Double-click | Open the file (Duplicates, Viewer) |
+| Right-click | Context menu: rename, open, recycle, ignore |
+
+## Data safety
+
+- every deletion goes through the **Windows Recycle Bin**, never a direct erase;
+- the tag file cannot shrink without leaving a `.bak` copy;
+- before any move, assigned folders are re-synced from the table: **what you see wins**;
+- ignored duplicates are remembered **per path pair**, not per filename.
+
+## Configuration files
+
+Written next to the script, git-ignored:
+
+| File | Contents |
+|---|---|
+| `triphoto_config.json` | camera folder, ffmpeg path, column widths and sort order |
+| `triphoto_edits.json` | assigned folders, auto-saved |
+| `triphoto_ignore.json` | ignored duplicates |
+
+---
+
+## 📄 License / Licence
+
+MIT — see [LICENSE](LICENSE).
+
+## 🙏 Credits
+
+Built with [PySide6](https://doc.qt.io/qtforpython/) · [Pillow](https://python-pillow.org/) · [pillow-heif](https://github.com/bigcat88/pillow_heif) · [send2trash](https://github.com/arsenetar/send2trash) · [FFmpeg](https://ffmpeg.org/)

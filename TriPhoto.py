@@ -1,1649 +1,3710 @@
 #!/usr/bin/env python3
 """
-TriPhoto - Smart Photo/Video Organizer
-Organizes camera uploads by year with duplicate detection and manual categorization
+TriPhoto - Smart Photo/Video Organizer (Qt edition)
+Assistant en 3 volets : renommage des dossiers, doublons, tri des médias.
+Logs dans la console. Rien n'est exécuté sans validation.
 """
 
 import os
 import re
+import sys
 import json
 import shutil
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-from datetime import datetime
+import zlib
+import difflib
+import filecmp
 import threading
-import queue
-from pathlib import Path
+import subprocess
+from collections import OrderedDict, deque
+from datetime import timedelta
+from datetime import datetime
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE = os.path.join(SCRIPT_DIR, 'triphoto_config.json')
+EDITS_FILE = os.path.join(SCRIPT_DIR, 'triphoto_edits.json')
+IGNORE_FILE = os.path.join(SCRIPT_DIR, 'triphoto_ignore.json')
+EXCLUSION_FILE = os.path.join(SCRIPT_DIR, 'FolderDoublonExclusion.txt')
+
+DEFAULT_CAMERA_PATH = r"P:\AutoUpload\Xiaomi 2407FPN8EG\DCIM\Camera"
+
+IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.heic', '.heif'}
+VIDEO_EXTS = {'.mp4', '.avi', '.mov', '.wmv', '.flv', '.mkv', '.m4v', '.3gp', '.webm', '.mts'}
+VIDEO_PERCENTS = [0, 10, 15, 25, 30, 50, 65, 75, 85, 95, 100]
+
+
+def log(message):
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+
+
+# ==================== AUTO-INSTALL DEPENDENCIES ====================
+
+def ensure_packages():
+    """Detect missing packages and pip-install them automatically"""
+    required = {
+        'PIL': 'pillow',
+        'pillow_heif': 'pillow-heif',
+        'send2trash': 'send2trash',
+        'PySide6': 'PySide6',
+    }
+    flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+
+    missing = []
+    for module, package in required.items():
+        try:
+            __import__(module)
+            log(f"Deps: ✅ {package}: OK")
+        except ImportError:
+            missing.append((module, package))
+
+    if not missing:
+        return
+
+    for module, package in missing:
+        log(f"Deps: ⬇️ {package}: missing, installing (peut prendre quelques minutes)...")
+        try:
+            result = subprocess.run(
+                [sys.executable, '-m', 'pip', 'install', package],
+                capture_output=True, text=True, timeout=900, creationflags=flags
+            )
+            output = (result.stdout or '') + '\n' + (result.stderr or '')
+            for line in output.splitlines():
+                if 'Successfully installed' in line or 'already satisfied' in line:
+                    log(f"Deps:    pip: {line.strip()}")
+            if result.returncode != 0:
+                tail = output.strip().splitlines()[-3:]
+                log(f"Deps: ❌ {package}: pip failed -> " + " | ".join(tail))
+        except Exception as e:
+            log(f"Deps: ❌ {package}: install error -> {e}")
+
+    # Refresh import system so freshly installed packages are found
+    import importlib
+    import site
+    importlib.invalidate_caches()
+    try:
+        user_site = site.getusersitepackages()
+        if user_site and os.path.isdir(user_site) and user_site not in sys.path:
+            sys.path.insert(0, user_site)
+            log(f"Deps: added to sys.path: {user_site}")
+    except Exception:
+        pass
+
+    for module, package in missing:
+        try:
+            __import__(module)
+            log(f"Deps: ✅ {package}: ready")
+        except ImportError as e:
+            log(f"Deps: ❌ {package}: still not importable ({e})")
+
+
+ensure_packages()
+
+PIL_AVAILABLE = False
+HEIF_AVAILABLE = False
+try:
+    from PIL import Image
+    PIL_AVAILABLE = True
+    try:
+        from pillow_heif import register_heif_opener
+        register_heif_opener()
+        HEIF_AVAILABLE = True
+    except ImportError:
+        pass
+except ImportError:
+    pass
+
+# BILINEAR is several times faster than LANCZOS and indistinguishable once the
+# result is scaled down again for the viewer.
+RESAMPLE_FAST = 2
+if PIL_AVAILABLE:
+    _res = getattr(Image, 'Resampling', Image)
+    RESAMPLE_FAST = getattr(_res, 'BILINEAR', 2)
 
 try:
-    from PIL import Image, ImageTk
-    from pillow_heif import register_heif_opener
-    register_heif_opener()
+    from PySide6.QtWidgets import (
+        QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
+        QLabel, QLineEdit, QPushButton, QFileDialog, QTableWidget, QTableWidgetItem,
+        QListWidget, QListWidgetItem, QSplitter, QAbstractItemView, QHeaderView,
+        QScrollArea, QMessageBox, QStyleFactory, QSizePolicy, QMenu, QInputDialog,
+        QRadioButton, QButtonGroup
+    )
+    from PySide6.QtGui import (QPalette, QColor, QImage, QPixmap, QShortcut, QKeySequence,
+                               QPainter, QPen, QIcon)
+    from PySide6.QtCore import QPointF, QObject
+    from PySide6.QtWidgets import QCheckBox
+    from PySide6.QtCore import Qt, QTimer, QEvent, QSize, Signal, QThread, QByteArray
 except ImportError as e:
-    print(f"Warning: {e}")
-    print("Install: pip install pillow pillow-heif")
+    log(f"❌ PySide6 introuvable: {e}")
+    log("Relance le script (l'installation vient peut-être de finir), ou lance: pip install PySide6")
+    try:
+        input("Appuie sur Entrée pour quitter...")
+    except EOFError:
+        pass
+    sys.exit(1)
 
-class TriPhotoApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("TriPhoto - Smart Photo Organizer")
-        self.root.geometry("1400x700")
 
-        # Variables
-        self.base_path = tk.StringVar()
-        self.root_files = []  # Files in root
-        self.year_files = {}  # {year: [list of filenames already organized]}
-        self.file_data = {}  # {filename: {year, folder_name, path_final}}
-        self.queue = queue.Queue()
-        
-        # Folder colors - defined by listbox, applied to treeview
-        self.folder_colors = {}  # {folder_name: color}
-        
-        # Video cache
-        self.video_cache_dir = None
-        self.current_video_screenshots = []  # List of screenshot paths
-        self.current_screenshot_index = 0
-        
-        # Duplicate ignore list
-        self.duplicate_ignore_list = set()  # Set of filenames to ignore
-        
-        # Config and cache files next to script
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        self.config_file = os.path.join(script_dir, "triphoto_config.json")
-        self.edits_cache_file = os.path.join(script_dir, "triphoto_edits.json")
-        self.ignore_list_file = os.path.join(script_dir, "triphoto_ignore.json")
-        
-        # Create video cache folder if base path exists
-        self.load_config()
-        base_path_value = self.base_path.get()
-        if base_path_value and os.path.exists(base_path_value):
-            self.video_cache_dir = os.path.join(base_path_value, '!tempvideoscreen')
-            os.makedirs(self.video_cache_dir, exist_ok=True)
-        
-        # Load ignore list
-        self.load_ignore_list()
-        
-        self.current_image = None
-        self.current_image_pil = None
-        self.current_filepath = None
-        self.zoom_level = 1.0
-        self.mpc_hc_path = r"C:\Program Files (x86)\K-Lite Codec Pack\MPC-HC64\mpc-hc64.exe"
+# ==================== HELPERS ====================
 
-        # File extensions
-        self.image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.heic', '.heif'}
-        self.video_extensions = {'.mp4', '.avi', '.mov', '.wmv', '.flv', '.mkv', '.m4v', '.3gp', '.webm', '.mts'}
+def load_json(path, default):
+    try:
+        if os.path.exists(path):
+            with open(path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception as e:
+        log(f"❌ Error loading {os.path.basename(path)}: {e}")
+    return default
 
-        self.setup_ui()
-        self.check_queue()
 
-    def load_config(self):
-        """Load configuration"""
-        default_config = {
-            "camera_path": "D:/DOCS/Documents/Camera Uploads/DCIM MI11TPRO/Camera"
-        }
+def save_json(path, data):
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        log(f"❌ Error saving {os.path.basename(path)}: {e}")
 
-        print(f"=== LOADING CONFIG ===")
-        print(f"Config file: {os.path.abspath(self.config_file)}")
-        print(f"Current directory: {os.getcwd()}")
 
+def folder_color(name):
+    """Stable dark pastel color for a folder name (readable with white text)"""
+    hue = zlib.crc32(name.encode('utf-8')) % 360
+    return QColor.fromHsl(hue, 90, 80)
+
+
+# Date + time written in the filename, whatever the camera / app that produced it.
+# The prefix (IMG_, VID_, PANO_, Screenshot_...) is deliberately ignored: only the
+# timestamp matters, so photos and videos of the same moment sit next to each other.
+DATETIME_PATTERNS = [
+    # 20250108_181456   /  2025-01-08_18-14-56  /  2025-01-08 18.14.56
+    r'(?<!\d)(20\d{2})[-_.]?(0[1-9]|1[0-2])[-_.]?(0[1-9]|[12]\d|3[01])'
+    r'[-_ T]?(([01]\d|2[0-3]))[-_.:]?([0-5]\d)[-_.:]?([0-5]\d)(?!\d)',
+    # Screenshot_2024-04-13-10-12-33-965
+    r'(?<!\d)(20\d{2})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])'
+    r'-([01]\d|2[0-3])-([0-5]\d)-([0-5]\d)(?!\d)',
+]
+
+
+def datetime_from_name(filename):
+    """Timestamp encoded in the name, or None"""
+    for pattern in DATETIME_PATTERNS:
+        m = re.search(pattern, filename)
+        if not m:
+            continue
+        g = m.groups()
+        parts = [g[0], g[1], g[2], g[3], g[-2], g[-1]]
         try:
-            if os.path.exists(self.config_file):
-                print(f"✅ Config file found")
-                with open(self.config_file, 'r', encoding='utf-8') as f:
-                    self.config = json.load(f)
-            else:
-                print(f"ℹ️ Config file not found, creating with default values")
-                self.config = default_config
-                self.save_config()
-        except Exception as e:
-            print(f"❌ Error loading config: {e}")
-            self.config = default_config
-
-        self.base_path.set(self.config.get("camera_path", default_config["camera_path"]))
-
-    def save_config(self):
-        """Save configuration"""
+            return datetime(*(int(p) for p in parts))
+        except (ValueError, TypeError):
+            continue
+    stem = os.path.splitext(filename)[0]
+    m = re.match(r'^(\d{13}|\d{10})$', stem)      # epoch, in seconds or milliseconds
+    if m:
+        ts = int(m.group(1))
+        if len(m.group(1)) == 13:
+            ts /= 1000
         try:
-            self.config["camera_path"] = self.base_path.get()
-            
-            # Detailed logs
-            print(f"=== SAVING CONFIG ===")
-            print(f"Config file: {os.path.abspath(self.config_file)}")
-            print(f"Directory: {os.path.dirname(os.path.abspath(self.config_file)) or os.getcwd()}")
-            print(f"Directory exists: {os.path.exists(os.path.dirname(os.path.abspath(self.config_file)) or os.getcwd())}")
-            print(f"File already exists: {os.path.exists(self.config_file)}")
-            
-            # Direct save (no temp file for debug)
-            with open(self.config_file, 'w', encoding='utf-8') as f:
-                json.dump(self.config, f, indent=2, ensure_ascii=False)
-            
-            print(f"✅ Config saved successfully")
-            
-        except Exception as e:
-            print(f"❌ Error saving config:")
-            print(f"   Type: {type(e).__name__}")
-            print(f"   Message: {e}")
-            import traceback
-            traceback.print_exc()
-
-    def load_ignore_list(self):
-        """Load duplicate ignore list from JSON"""
-        try:
-            if os.path.exists(self.ignore_list_file):
-                with open(self.ignore_list_file, 'r', encoding='utf-8') as f:
-                    self.duplicate_ignore_list = set(json.load(f))
-        except Exception as e:
-            print(f"Error loading ignore list: {e}")
-            self.duplicate_ignore_list = set()
-
-    def save_ignore_list(self):
-        """Save duplicate ignore list to JSON"""
-        try:
-            with open(self.ignore_list_file, 'w', encoding='utf-8') as f:
-                json.dump(list(self.duplicate_ignore_list), f, indent=2)
-        except Exception as e:
-            print(f"Error saving ignore list: {e}")
-
-    def setup_ui(self):
-        """Setup user interface"""
-        # Main container
-        main_frame = ttk.Frame(self.root, padding="10")
-        main_frame.pack(fill=tk.BOTH, expand=True)
-
-        # === CONFIGURATION ===
-        config_frame = ttk.LabelFrame(main_frame, text="⚙️ Configuration", padding="10")
-        config_frame.pack(fill=tk.X, pady=(0, 10))
-
-        ttk.Label(config_frame, text="Camera Folder:").grid(row=0, column=0, sticky=tk.W)
-        path_entry = ttk.Entry(config_frame, textvariable=self.base_path, width=60)
-        path_entry.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=(5, 0))
-        # Save only when leaving field (not on every keystroke)
-        path_entry.bind('<FocusOut>', lambda e: self.save_config())
-
-        ttk.Button(config_frame, text="Browse", command=self.browse_folder).grid(row=0, column=2, padx=(5, 0))
-        ttk.Button(config_frame, text="Scan", command=self.start_scan).grid(row=0, column=3, padx=(5, 0))
-
-        config_frame.columnconfigure(1, weight=1)
-
-        # === SPLIT PANEL ===
-        paned_window = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL)
-        paned_window.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
-
-        # Left panel - TreeView
-        left_panel = ttk.Frame(paned_window)
-        paned_window.add(left_panel, weight=2)
-
-        # Middle panel - Folders
-        middle_panel = ttk.Frame(paned_window)
-        paned_window.add(middle_panel, weight=1)
-
-        # Right panel - Viewer
-        right_panel = ttk.Frame(paned_window)
-        paned_window.add(right_panel, weight=1)
-
-        # === TREEVIEW ===
-        tree_frame = ttk.LabelFrame(left_panel, text="📋 Files to Organize", padding="5")
-        tree_frame.pack(fill=tk.BOTH, expand=True)
-
-        # Columns: filename_display, year, folder_name, path_final
-        columns = ('filename_display', 'year', 'folder_name', 'path_final')
-        self.tree = ttk.Treeview(tree_frame, columns=columns, show='headings', height=12, selectmode='extended')
-
-        self.tree.heading('filename_display', text='Filename')
-        self.tree.heading('year', text='Year')
-        self.tree.heading('folder_name', text='Folder Name')
-        self.tree.heading('path_final', text='Final Path')
-
-        self.tree.column('filename_display', width=250)
-        self.tree.column('year', width=60)
-        self.tree.column('folder_name', width=250)
-        self.tree.column('path_final', width=300)
-
-        scrollbar_tree = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scrollbar_tree.set)
-
-        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar_tree.pack(side=tk.RIGHT, fill=tk.Y)
-
-        # Configure tag for blue selection
-        self.tree.tag_configure('selected_cell', background='lightblue')
-
-        # Bind selection to display in viewer
-        self.tree.bind('<<TreeviewSelect>>', self.on_tree_select)
-        # Double-click on Year to edit
-        self.tree.bind('<Double-1>', self.on_tree_double_click)
-        # Delete key to delete
-        self.tree.bind('<Delete>', lambda e: self.delete_selected())
-
-        # === FOLDERS LISTBOX (MIDDLE PANEL) ===
-        self.folders_year_label = ttk.Label(middle_panel, text="📁 Folders", font=('Arial', 10, 'bold'))
-        self.folders_year_label.pack(pady=(0, 5))
-        
-        folders_list_frame = ttk.Frame(middle_panel)
-        folders_list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
-        
-        self.folders_listbox = tk.Listbox(folders_list_frame, font=('Consolas', 9))
-        scrollbar_folders = ttk.Scrollbar(folders_list_frame, orient=tk.VERTICAL, command=self.folders_listbox.yview)
-        self.folders_listbox.configure(yscrollcommand=scrollbar_folders.set)
-        
-        self.folders_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar_folders.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        # Bind click on listbox
-        self.folders_listbox.bind('<<ListboxSelect>>', self.on_folder_select)
-        
-        # Frame for new folder
-        new_folder_frame = ttk.LabelFrame(middle_panel, text="Create New", padding="5")
-        new_folder_frame.pack(fill=tk.X)
-        
-        self.new_folder_var = tk.StringVar()
-        new_folder_entry = ttk.Entry(new_folder_frame, textvariable=self.new_folder_var)
-        new_folder_entry.pack(fill=tk.X, pady=(0, 5))
-        new_folder_entry.bind('<Return>', lambda e: self.create_new_folder())
-        
-        ttk.Button(new_folder_frame, text="✨ Create", command=self.create_new_folder).pack(fill=tk.X)
-
-        # === VIEWER ===
-        viewer_frame = ttk.LabelFrame(right_panel, text="🖼️ Preview (Ctrl+Scroll = Zoom)", padding="10")
-        viewer_frame.pack(fill=tk.BOTH, expand=True)
-
-        self.canvas = tk.Canvas(viewer_frame, bg='gray20', highlightthickness=0)
-        self.canvas.pack(fill=tk.BOTH, expand=True)
-        
-        # Frame for video slider with clickable points
-        self.video_slider_frame = ttk.Frame(viewer_frame)
-        
-        # Canvas for custom slider with points
-        self.video_slider_canvas = tk.Canvas(self.video_slider_frame, height=40, bg='white', highlightthickness=1, highlightbackground='gray')
-        self.video_slider_canvas.pack(fill=tk.X)
-        self.video_slider_canvas.bind('<Button-1>', self.on_video_slider_click)
-        
-        self.video_slider_label = ttk.Label(self.video_slider_frame, text="", font=('Arial', 9))
-        self.video_slider_label.pack()
-        # Slider will be shown only for videos
-        
-        self.file_label = ttk.Label(viewer_frame, text="", font=('Arial', 9))
-        self.file_label.pack(pady=(5, 0))
-
-        # Zoom with wheel
-        self.canvas.bind('<Control-MouseWheel>', self.on_mouse_wheel)
-        self.canvas.bind('<Configure>', self.on_canvas_resize)
-
-        # === ACTION BUTTONS ===
-        action_frame = ttk.Frame(main_frame)
-        action_frame.pack(fill=tk.X)
-
-        ttk.Button(action_frame, text="⚡ Auto Screenshots/Recorder", command=self.auto_screenshots).pack(side=tk.LEFT, padx=5)
-        ttk.Button(action_frame, text="🔍 Check Duplicates", command=self.check_duplicates).pack(side=tk.LEFT, padx=5)
-        ttk.Button(action_frame, text="✅ APPLY", command=self.apply_changes, style='Accent.TButton').pack(side=tk.LEFT, padx=5)
-        ttk.Button(action_frame, text="🗑️ DELETE", command=self.delete_selected).pack(side=tk.LEFT, padx=5)
-        ttk.Button(action_frame, text="❌ Reset", command=self.reset_tree).pack(side=tk.LEFT, padx=5)
-
-        # === STATUS BAR ===
-        self.status_var = tk.StringVar(value="Ready")
-        status_bar = ttk.Label(main_frame, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
-        status_bar.pack(fill=tk.X, pady=(5, 0))
-
-    def draw_video_slider(self):
-        """Draw custom video slider with clickable points"""
-        print(f"[SLIDER] Drawing slider...")
-        canvas = self.video_slider_canvas
-        canvas.delete("all")
-        
-        width = canvas.winfo_width()
-        if width <= 1:
-            width = 600  # Default
-            print(f"[SLIDER] Canvas width not ready, using default: {width}")
-        else:
-            print(f"[SLIDER] Canvas width: {width}")
-        
-        height = 40
-        
-        # Percentages for points
-        percentages = [0, 10, 15, 25, 30, 50, 65, 75, 85, 95, 100]
-        print(f"[SLIDER] Current screenshot index: {self.current_screenshot_index}")
-        print(f"[SLIDER] Total screenshots: {len(self.current_video_screenshots)}")
-        
-        # Draw line
-        y_line = height // 2
-        canvas.create_line(20, y_line, width - 20, y_line, fill='gray', width=2)
-        
-        # Draw points
-        for idx, pct in enumerate(percentages):
-            x = 20 + (width - 40) * (pct / 100)
-            
-            # Draw circle - highlight current index
-            radius = 6
-            is_current = (idx == self.current_screenshot_index)
-            color = 'blue' if is_current else 'lightgray'
-            print(f"[SLIDER] Point {pct}% (index {idx}): color={color}, is_current={is_current}")
-            
-            canvas.create_oval(x - radius, y_line - radius, x + radius, y_line + radius, 
-                              fill=color, outline='darkgray', tags=f'point_{pct}')
-            
-            # Draw label
-            canvas.create_text(x, y_line + 15, text=f"{pct}%", font=('Arial', 8), tags=f'point_{pct}')
-        
-        # Bind clicks on points
-        for pct in percentages:
-            canvas.tag_bind(f'point_{pct}', '<Button-1>', 
-                           lambda e, p=pct: self.on_video_slider_point_click(p))
-        
-        print(f"[SLIDER] Slider drawn successfully")
-
-    def on_video_slider_click(self, event):
-        """Click on slider area"""
-        canvas = self.video_slider_canvas
-        width = canvas.winfo_width()
-        
-        # Calculate clicked percentage
-        x = event.x
-        pct = max(0, min(100, ((x - 20) / (width - 40)) * 100))
-        
-        # Find nearest point
-        percentages = [0, 10, 15, 25, 30, 50, 65, 75, 85, 95, 100]
-        nearest = min(percentages, key=lambda p: abs(p - pct))
-        
-        self.on_video_slider_point_click(nearest)
-
-    def on_video_slider_point_click(self, percentage):
-        """Click on a specific point"""
-        print(f"[SLIDER-CLICK] Clicked on {percentage}%")
-        
-        if not self.current_video_screenshots:
-            print(f"[SLIDER-CLICK] ERROR: No screenshots available")
-            return
-        
-        # Convert percentage to index
-        percentages = [0, 10, 15, 25, 30, 50, 65, 75, 85, 95, 100]
-        try:
-            index = percentages.index(percentage)
-            print(f"[SLIDER-CLICK] Percentage {percentage}% maps to index {index}")
-        except ValueError:
-            print(f"[SLIDER-CLICK] ERROR: Percentage {percentage}% not found in list")
-            return
-        
-        index = min(index, len(self.current_video_screenshots) - 1)
-        print(f"[SLIDER-CLICK] Clamped index: {index} (total screenshots: {len(self.current_video_screenshots)})")
-        
-        self.current_screenshot_index = index
-        
-        # Load and display screenshot
-        try:
-            screenshot_path = self.current_video_screenshots[index]
-            print(f"[SLIDER-CLICK] Loading screenshot: {screenshot_path}")
-            print(f"[SLIDER-CLICK] File exists: {os.path.exists(screenshot_path)}")
-            
-            img = Image.open(screenshot_path)
-            print(f"[SLIDER-CLICK] Image loaded, size: {img.size}")
-            
-            self.current_image_pil = img
-            
-            # FIX: Call resize_and_display_image() to convert PIL to PhotoImage
-            self.resize_and_display_image()
-            print(f"[SLIDER-CLICK] Image converted to PhotoImage and displayed")
-            
-            # Update label
-            self.video_slider_label.config(text=f"{percentage}%")
-            print(f"[SLIDER-CLICK] Label updated to {percentage}%")
-            
-            # Redraw slider with highlighted point
-            self.draw_video_slider()
-            
-        except Exception as e:
-            print(f"[SLIDER-CLICK] ERROR displaying screenshot: {e}")
-            import traceback
-            traceback.print_exc()
-
-    def browse_folder(self):
-        """Browse for camera folder"""
-        folder = filedialog.askdirectory(title="Select Camera Folder")
-        if folder:
-            self.base_path.set(folder)
-            self.save_config()
-
-    def start_scan(self):
-        """Start folder scan in background thread"""
-        base_path = self.base_path.get()
-        
-        if not base_path or not os.path.exists(base_path):
-            messagebox.showerror("Error", "Select a valid folder")
-            return
-
-        self.status_var.set("Scanning...")
-        self.root_files.clear()
-        self.year_files.clear()
-        
-        # Start thread
-        thread = threading.Thread(target=self.scan_folder, args=(base_path,), daemon=True)
-        thread.start()
-
-    def scan_folder(self, base_path):
-        """Scan folder for files (runs in background thread)"""
-        print(f"\n[SCAN] ========== Starting folder scan ==========")
-        print(f"[SCAN] Base path: {base_path}")
-        
-        try:
-            root_files = []
-            year_files = {}
-            duplicates_count = 0
-            
-            # Create !duplicate folder if needed
-            duplicate_folder = os.path.join(base_path, '!duplicate')
-            os.makedirs(duplicate_folder, exist_ok=True)
-            print(f"[SCAN] Duplicate folder: {duplicate_folder}")
-
-            # Scan root only (not recursive)
-            print(f"[SCAN] Scanning root directory...")
-            files_found = 0
-            for filename in os.listdir(base_path):
-                filepath = os.path.join(base_path, filename)
-                
-                # Skip directories and special files
-                if os.path.isdir(filepath):
-                    continue
-                
-                ext = os.path.splitext(filename)[1].lower()
-                if ext not in (self.image_extensions | self.video_extensions):
-                    continue
-
-                files_found += 1
-
-                # Extract year from filename
-                match = re.search(r'(20\d{2})', filename)
-                if match:
-                    year = match.group(1)
-                    
-                    # Index year folders if not done
-                    if year not in year_files:
-                        year_files[year] = set()
-                        year_folder = os.path.join(base_path, year)
-                        if os.path.exists(year_folder):
-                            print(f"[SCAN] Indexing year folder: {year}")
-                            # Scan recursively for existing files
-                            for root, dirs, files in os.walk(year_folder):
-                                year_files[year].update(files)
-                            print(f"[SCAN] Year {year} has {len(year_files[year])} existing files")
-                    
-                    # Check for duplicates
-                    if filename in year_files[year]:
-                        # Duplicate found - move to !duplicate
-                        print(f"[SCAN] DUPLICATE found: {filename}")
-                        try:
-                            dest_path = os.path.join(duplicate_folder, filename)
-                            # Handle name collision
-                            counter = 1
-                            while os.path.exists(dest_path):
-                                name, ext = os.path.splitext(filename)
-                                dest_path = os.path.join(duplicate_folder, f"{name}_{counter}{ext}")
-                                counter += 1
-                            shutil.move(filepath, dest_path)
-                            duplicates_count += 1
-                            print(f"[SCAN] Moved to: {dest_path}")
-                            continue
-                        except Exception as e:
-                            print(f"[SCAN] Error moving duplicate {filename}: {e}")
-                
-                # Extract datetime for sorting
-                datetime_obj = None
-                dt_match = re.search(r'(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})', filename)
-                if dt_match:
-                    try:
-                        datetime_obj = datetime(
-                            int(dt_match.group(1)), int(dt_match.group(2)), int(dt_match.group(3)),
-                            int(dt_match.group(4)), int(dt_match.group(5)), int(dt_match.group(6))
-                        )
-                    except:
-                        pass
-                
-                root_files.append({
-                    'filename': filename,
-                    'filepath': filepath,
-                    'ext': ext,
-                    'datetime': datetime_obj
-                })
-            
-            print(f"[SCAN] Total files found: {files_found}")
-            print(f"[SCAN] Files to organize: {len(root_files)}")
-            print(f"[SCAN] Duplicates moved: {duplicates_count}")
-            
-            # Sort by datetime
-            root_files.sort(key=lambda x: x['datetime'] if x['datetime'] else datetime.min)
-            print(f"[SCAN] Files sorted by datetime")
-            
-            # Send result to main thread
-            self.queue.put(('done', {
-                'root_files': root_files,
-                'year_files': year_files,
-                'duplicates_count': duplicates_count
-            }))
-            
-            print(f"[SCAN] ========== Scan complete ==========\n")
-            
-        except Exception as e:
-            print(f"[SCAN] ERROR: {e}")
-            import traceback
-            traceback.print_exc()
-            self.queue.put(('error', str(e)))
-
-    def check_queue(self):
-        """Check for messages from background thread"""
-        try:
-            msg_type, data = self.queue.get_nowait()
-
-            if msg_type == 'done':
-                self.root_files = data['root_files']
-                self.year_files = data['year_files']
-                
-                self.update_ui()
-                
-                msg = f"Scan completed: {len(self.root_files)} files to organize"
-                if data['duplicates_count'] > 0:
-                    msg += f"\n{data['duplicates_count']} duplicates moved to !duplicate"
-                
-                self.status_var.set(msg)
-                messagebox.showinfo("Scan completed", msg)
-            
-            elif msg_type == 'error':
-                messagebox.showerror("Error", f"Scan error: {data}")
-                self.status_var.set("Error during scan")
-                
-        except queue.Empty:
+            return datetime.fromtimestamp(ts)
+        except (ValueError, OSError):
             pass
-        
-        # Check again after 100ms
-        self.root.after(100, self.check_queue)
+    return None
 
-    def on_tree_select(self, event):
-        """File selected in TreeView"""
-        selection = self.tree.selection()
-        if not selection:
-            return
 
-        # Take first selected for display
-        item_id = selection[0]
-        values = self.tree.item(item_id, 'values')
-        filename = values[0]  # Original name
-        year = values[1]
-        
-        # Refresh folder listbox for this year
-        if year:
-            self.refresh_folders_listbox(year)
-        
-        # Find corresponding file
-        for file_info in self.root_files:
-            if file_info['filename'] == filename:
-                self.current_filepath = file_info['filepath']
-                self.zoom_level = 1.0  # Reset zoom
-                self.display_media(file_info)
-                break
+def file_datetime(filename, filepath):
+    """Shooting date and time: the name first, the file's mtime as a fallback.
+    Never returns None, so sorting by date is always meaningful."""
+    dt = datetime_from_name(filename)
+    if dt:
+        return dt
+    try:
+        return datetime.fromtimestamp(os.path.getmtime(filepath))
+    except Exception:
+        return datetime.min
 
-    def on_tree_double_click(self, event):
-        """Double-click to edit cell (Year only)"""
-        region = self.tree.identify_region(event.x, event.y)
-        if region != "cell":
-            return
 
-        column = self.tree.identify_column(event.x)
-        row_id = self.tree.identify_row(event.y)
-        
-        if not row_id:
-            return
-
-        # Editable column: year (#2) only
-        if column != '#2':
-            return
-
-        # Get current value
-        values = self.tree.item(row_id, 'values')
-        filename = values[0]
-        col_index = int(column[1]) - 1
-        current_value = values[col_index]
-
-        # Create edit popup
-        popup = tk.Toplevel(self.root)
-        popup.title("Edit Year")
-        popup.geometry("300x100")
-        popup.transient(self.root)
-        popup.grab_set()
-
-        ttk.Label(popup, text="Year:").pack(pady=5)
-        
-        entry_var = tk.StringVar(value=current_value)
-        entry = ttk.Entry(popup, textvariable=entry_var, width=40)
-        entry.pack(pady=5)
-        entry.focus()
-        entry.select_range(0, tk.END)
-
-        def save():
-            new_value = entry_var.get().strip()
-            values_list = list(values)
-            values_list[col_index] = new_value
-            
-            # Update file_data (year)
-            self.file_data[filename]['year'] = new_value
-            
-            # Recalculate final path
-            self.update_path_final(filename, values_list)
-            
-            self.tree.item(row_id, values=values_list)
-            
-            # Save
-            self.save_edits()
-            
-            popup.destroy()
-            self.tree.focus_set()
-            
-            # Refresh folder listbox if year changed
-            if new_value:
-                self.refresh_folders_listbox(new_value)
-
-        ttk.Button(popup, text="OK", command=save).pack(pady=5)
-        entry.bind('<Return>', lambda e: save())
-        entry.bind('<Escape>', lambda e: popup.destroy())
-
-    def display_media(self, file_info):
-        """Display image or video"""
-        filepath = file_info['filepath']
-        filename = file_info['filename']
-        ext = file_info['ext']
-
-        print(f"\n[DISPLAY] ========== Displaying media ==========")
-        print(f"[DISPLAY] Filename: {filename}")
-        print(f"[DISPLAY] Extension: {ext}")
-        print(f"[DISPLAY] Path: {filepath}")
-
-        self.file_label.configure(text=filename)
-
-        if ext in self.video_extensions:
-            print(f"[DISPLAY] Type: VIDEO")
-            
-            # Reset
-            self.current_video_screenshots = []
-            print(f"[DISPLAY] Reset current_video_screenshots")
-            
-            # Extract screenshots
-            self.canvas.delete("all")
-            self.canvas.create_text(
-                self.canvas.winfo_width()//2, 
-                self.canvas.winfo_height()//2,
-                text="⏳ Extracting screenshots...",
-                fill="white",
-                font=('Arial', 12)
-            )
-            self.root.update()
-            print(f"[DISPLAY] Showing 'Extracting...' message")
-            
-            success = self.extract_video_screenshots(filepath)
-            print(f"[DISPLAY] Extraction result: {success}")
-            print(f"[DISPLAY] Screenshots count: {len(self.current_video_screenshots)}")
-            
-            if success and self.current_video_screenshots:
-                print(f"[DISPLAY] SUCCESS - Showing slider")
-                
-                # Show slider
-                self.video_slider_frame.pack(fill=tk.X, before=self.file_label, pady=5)
-                print(f"[DISPLAY] Slider frame packed")
-                
-                # Draw slider with points
-                self.root.after(100, self.draw_video_slider)  # Wait for canvas to be sized
-                print(f"[DISPLAY] Scheduled draw_video_slider in 100ms")
-                
-                # Display screenshot at 25% by default
-                print(f"[DISPLAY] Clicking on 25% point by default")
-                self.on_video_slider_point_click(25)
-            else:
-                print(f"[DISPLAY] FALLBACK - Showing clickable icon")
-                
-                # Fallback: display clickable icon
-                self.canvas.delete("all")
-                self.canvas.create_text(
-                    self.canvas.winfo_width()//2, 
-                    self.canvas.winfo_height()//2,
-                    text="▶️ Video\nDouble-click to play",
-                    fill="white",
-                    font=('Arial', 16, 'bold'),
-                    tags="video_icon"
-                )
-                self.canvas.tag_bind("video_icon", "<Double-1>", 
-                                    lambda e: self.play_video(filepath))
-                # Hide slider
-                self.video_slider_frame.pack_forget()
-                print(f"[DISPLAY] Slider frame hidden")
-            
-        elif ext in self.image_extensions:
-            print(f"[DISPLAY] Type: IMAGE")
-            
-            # Hide slider for images
-            self.video_slider_frame.pack_forget()
-            self.current_video_screenshots = []
-            print(f"[DISPLAY] Slider hidden, screenshots cleared")
-            
-            self.display_image(filepath)
-        
-        print(f"[DISPLAY] ========== Display complete ==========\n")
-
-    def display_image(self, filepath):
-        """Display image"""
+def get_year_from_file(filename, filepath):
+    """Year from: filename date, epoch timestamp name, EXIF date taken, file mtime"""
+    m = re.search(r'(20\d{2})[-_]?(0[1-9]|1[0-2])[-_]?(0[1-9]|[12]\d|3[01])', filename)
+    if m:
+        return m.group(1)
+    m = re.search(r'(20\d{2})', filename)
+    if m:
+        return m.group(1)
+    stem = os.path.splitext(filename)[0]
+    m = re.match(r'^(\d{13}|\d{10})$', stem)
+    if m:
+        ts = int(m.group(1))
+        if len(m.group(1)) == 13:
+            ts /= 1000
         try:
-            image = Image.open(filepath)
-            self.current_image_pil = image
-            self.resize_and_display_image()
-        except Exception as e:
-            self.canvas.delete("all")
-            self.canvas.create_text(
-                self.canvas.winfo_width()//2,
-                self.canvas.winfo_height()//2,
-                text=f"❌ Error\n{str(e)}",
-                fill="red",
-                font=('Arial', 10)
-            )
-
-    def resize_and_display_image(self):
-        """Resize and display image with zoom"""
-        if not hasattr(self, 'current_image_pil') or self.current_image_pil is None:
-            return
-
-        canvas_width = self.canvas.winfo_width()
-        canvas_height = self.canvas.winfo_height()
-
-        if canvas_width <= 1 or canvas_height <= 1:
-            return
-
-        img = self.current_image_pil
-        img_width, img_height = img.size
-
-        # Calculate scale to fit canvas
-        scale = min(canvas_width / img_width, canvas_height / img_height)
-        
-        # Apply zoom
-        scale *= self.zoom_level
-        
-        new_width = int(img_width * scale)
-        new_height = int(img_height * scale)
-
-        if new_width > 0 and new_height > 0:
-            resized = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-            self.current_image = ImageTk.PhotoImage(resized)
-            
-            self.redraw_image()
-
-    def redraw_image(self):
-        """Redraw image on canvas"""
-        if self.current_image:
-            canvas_width = self.canvas.winfo_width()
-            canvas_height = self.canvas.winfo_height()
-
-            x = canvas_width // 2
-            y = canvas_height // 2
-
-            self.canvas.delete("all")
-            self.canvas.create_image(x, y, image=self.current_image, anchor=tk.CENTER)
-
-    def extract_video_screenshots(self, video_path):
-        """Extract video screenshots at different percentages"""
-        print(f"\n[EXTRACT] ========== Starting video screenshot extraction ==========")
-        print(f"[EXTRACT] Video path: {video_path}")
-        print(f"[EXTRACT] File exists: {os.path.exists(video_path)}")
-        
+            return str(datetime.fromtimestamp(ts).year)
+        except (ValueError, OSError):
+            pass
+    ext = os.path.splitext(filename)[1].lower()
+    if PIL_AVAILABLE and ext in IMAGE_EXTS:
         try:
-            import subprocess
-            
-            # Create cache folder if needed
-            if not self.video_cache_dir:
-                base = self.base_path.get()
-                self.video_cache_dir = os.path.join(base, '!tempvideoscreen')
-                os.makedirs(self.video_cache_dir, exist_ok=True)
-                print(f"[EXTRACT] Created cache dir: {self.video_cache_dir}")
-            else:
-                print(f"[EXTRACT] Using cache dir: {self.video_cache_dir}")
-            
-            # Hash file for unique name
-            video_hash = str(abs(hash(video_path)))[-8:]
-            print(f"[EXTRACT] Video hash: {video_hash}")
-            
-            # Check if already cached
-            cache_pattern = os.path.join(self.video_cache_dir, f"{video_hash}_*.jpg")
-            import glob
-            existing = sorted(glob.glob(cache_pattern))
-            print(f"[EXTRACT] Found {len(existing)} existing cached screenshots")
-            
-            if len(existing) >= 11:  # Already extracted
-                print(f"[EXTRACT] Using cached screenshots:")
-                for i, path in enumerate(existing):
-                    print(f"[EXTRACT]   {i}: {os.path.basename(path)}")
-                self.current_video_screenshots = existing
-                return True
-            
-            print(f"[EXTRACT] Need to extract new screenshots")
-            
-            # Get video duration
-            print(f"[EXTRACT] Getting video duration with ffprobe...")
-            cmd_duration = [
-                'ffprobe', '-v', 'error',
-                '-show_entries', 'format=duration',
-                '-of', 'default=noprint_wrappers=1:nokey=1',
-                video_path
-            ]
-            print(f"[EXTRACT] Command: {' '.join(cmd_duration)}")
-            
-            result = subprocess.run(cmd_duration, capture_output=True, text=True, timeout=10, 
-                                  creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
-            
-            print(f"[EXTRACT] ffprobe return code: {result.returncode}")
-            print(f"[EXTRACT] ffprobe stdout: {result.stdout}")
-            print(f"[EXTRACT] ffprobe stderr: {result.stderr}")
-            
-            duration = float(result.stdout.strip())
-            print(f"[EXTRACT] Video duration: {duration} seconds")
-            
-            # Percentages to extract
-            percentages = [0, 10, 15, 25, 30, 50, 65, 75, 85, 95, 100]
-            self.current_video_screenshots = []
-            
-            print(f"[EXTRACT] Extracting {len(percentages)} screenshots...")
-            
-            for idx, pct in enumerate(percentages):
-                timestamp = (duration * pct) / 100
-                # Avoid exceeding end
-                if pct == 100:
-                    timestamp = max(0, duration - 0.5)
-                
-                output_path = os.path.join(self.video_cache_dir, f"{video_hash}_{pct:03d}.jpg")
-                
-                print(f"[EXTRACT] [{idx+1}/{len(percentages)}] Extracting {pct}% (t={timestamp:.2f}s) -> {os.path.basename(output_path)}")
-                
-                cmd_extract = [
-                    'ffmpeg', '-ss', str(timestamp),
-                    '-i', video_path,
-                    '-vframes', '1',
-                    '-q:v', '2',
-                    '-y',  # Overwrite
-                    output_path
-                ]
-                
-                result = subprocess.run(cmd_extract, capture_output=True, timeout=10,
-                             creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
-                
-                if result.returncode != 0:
-                    print(f"[EXTRACT] WARNING: ffmpeg returned code {result.returncode}")
-                    print(f"[EXTRACT] stderr: {result.stderr.decode('utf-8', errors='ignore')[:200]}")
-                
-                if os.path.exists(output_path):
-                    file_size = os.path.getsize(output_path)
-                    print(f"[EXTRACT] ✓ Screenshot created: {file_size} bytes")
-                    self.current_video_screenshots.append(output_path)
+            img = Image.open(filepath)
+            exif = img.getexif()
+            dt = None
+            try:
+                dt = exif.get_ifd(0x8769).get(36867)  # DateTimeOriginal
+            except Exception:
+                pass
+            if not dt:
+                dt = exif.get(306)  # DateTime
+            img.close()
+            if dt and re.match(r'^(19|20)\d{2}', str(dt)):
+                return str(dt)[:4]
+        except Exception:
+            pass
+    try:
+        return str(datetime.fromtimestamp(os.path.getmtime(filepath)).year)
+    except Exception:
+        return None
+
+
+def safe_move(src, target_folder, dup_dir=None):
+    """Move file to folder with collision handling.
+    If an identical file (same name + same size) already exists at destination
+    and dup_dir is given, src goes to dup_dir instead (never duplicated with _1/_2)."""
+    os.makedirs(target_folder, exist_ok=True)
+    filename = os.path.basename(src)
+    dest = os.path.join(target_folder, filename)
+    if os.path.exists(dest) and dup_dir:
+        try:
+            if os.path.getsize(src) == os.path.getsize(dest):
+                return safe_move(src, dup_dir)
+        except OSError:
+            pass
+    counter = 1
+    while os.path.exists(dest):
+        name, ext = os.path.splitext(filename)
+        dest = os.path.join(target_folder, f"{name}_{counter}{ext}")
+        counter += 1
+    shutil.move(src, dest)
+    return dest
+
+
+def merge_folders(src, dst, dup_dir):
+    """Merge src folder into dst (collision-safe).
+    Same-name same-size files go to dup_dir (never deleted).
+    Emptied source (sub)folders are removed. Returns (moved, dups, errors)."""
+    if os.path.normcase(os.path.abspath(src)) == os.path.normcase(os.path.abspath(dst)):
+        # Windows: same folder with different case -> NEVER merge into itself
+        log(f"⚠️ Merge refusé (même dossier, casse différente): {src}")
+        return 0, 0, 1
+    moved = dups = errors = 0
+    os.makedirs(dst, exist_ok=True)
+    for entry in os.listdir(src):
+        s = os.path.join(src, entry)
+        d = os.path.join(dst, entry)
+        try:
+            if os.path.isdir(s):
+                if os.path.exists(d):
+                    m, du, e = merge_folders(s, d, dup_dir)
+                    moved += m
+                    dups += du
+                    errors += e
                 else:
-                    print(f"[EXTRACT] ✗ Screenshot NOT created!")
-            
-            print(f"[EXTRACT] Extraction complete: {len(self.current_video_screenshots)}/{len(percentages)} screenshots")
-            print(f"[EXTRACT] Screenshots list:")
-            for i, path in enumerate(self.current_video_screenshots):
-                print(f"[EXTRACT]   {i}: {os.path.basename(path)}")
-            
-            print(f"[EXTRACT] ========== Extraction finished ==========\n")
-            return len(self.current_video_screenshots) > 0
-            
-        except Exception as e:
-            print(f"[EXTRACT] ERROR: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-
-    def on_mouse_wheel(self, event):
-        """Zoom with Ctrl+Wheel"""
-        if event.delta > 0:
-            self.zoom_level *= 1.1
-        else:
-            self.zoom_level *= 0.9
-        
-        # Limit zoom
-        self.zoom_level = max(0.1, min(self.zoom_level, 10.0))
-        
-        self.resize_and_display_image()
-
-    def on_canvas_resize(self, event):
-        """Canvas resized"""
-        if hasattr(self, 'current_image_pil') and self.current_image_pil is not None:
-            self.resize_and_display_image()
-
-    def play_video(self, filepath):
-        """Play video"""
-        try:
-            if os.path.exists(self.mpc_hc_path):
-                os.startfile(filepath, 'open')
+                    shutil.move(s, d)
+                    moved += 1
+            elif os.path.exists(d) and os.path.getsize(s) == os.path.getsize(d):
+                safe_move(s, dup_dir)
+                dups += 1
             else:
-                os.startfile(filepath)
-        except Exception as e:
-            messagebox.showerror("Error", f"Cannot play video:\n{e}")
-
-    def update_ui(self):
-        """Update interface"""
-        # Load previous edits
-        saved_edits = self.load_edits()
-        
-        # Update tree
-        self.tree.delete(*self.tree.get_children())
-        self.file_data.clear()
-
-        for file_info in self.root_files:
-            filename = file_info['filename']
-            
-            # Extract year
-            match = re.search(r'(20\d{2})', filename)
-            year = match.group(1) if match else ""
-            
-            # Display original name (no formatting)
-            display_name = filename
-            
-            # Retrieve saved edit if exists
-            folder_name = saved_edits.get(filename, '')
-            
-            # Initialize data
-            self.file_data[filename] = {
-                'year': year,
-                'folder_name': folder_name,
-                'path_final': ''
-            }
-            
-            # Create row
-            item_id = self.tree.insert('', 'end', values=(display_name, year, folder_name, ''))
-            
-            # Calculate final path if folder_name exists
-            if folder_name:
-                values = [display_name, year, folder_name, '']
-                self.update_path_final(filename, values)
-                self.tree.item(item_id, values=values)
-                
-                # Apply color (will be assigned by listbox)
-                self.apply_folder_color(item_id, folder_name)
-        
-        # Select first row and set focus
-        all_items = self.tree.get_children()
-        if all_items:
-            first_item = all_items[0]
-            self.tree.selection_set(first_item)
-            self.tree.focus(first_item)
-            self.tree.see(first_item)
-            self.on_tree_select(None)  # Display in viewer
-        
-        # Set focus on TreeView
-        self.tree.focus_set()
-
-    def update_path_final(self, filename, values):
-        """Calculate final path"""
-        year = values[1]
-        folder_name = values[2]
-        
-        if folder_name:
-            # folder_name already contains everything (e.g., "2024-08-15 Vacation")
-            path_final = f"\\{year}\\{folder_name}\\{filename}"
-            self.file_data[filename]['path_final'] = path_final
-            values[3] = path_final
-        else:
-            # If no folder name, suggest adding one
-            values[3] = "⚠️ Add folder name"
-
-    def auto_screenshots(self):
-        """Auto-organize screenshots and screen recorder"""
-        if not self.root_files:
-            messagebox.showinfo("Info", "No files to organize")
-            return
-
-        count = 0
-        for file_info in self.root_files[:]:
-            filename = file_info['filename']
-            
-            # Check if screenshot or screen recorder
-            is_screenshot = 'screenshot' in filename.lower()
-            is_recorder = 'screen' in filename.lower() and 'recorder' in filename.lower()
-            
-            if not (is_screenshot or is_recorder):
-                continue
-            
-            # Extract year
-            match = re.search(r'(20\d{2})', filename)
-            if not match:
-                continue
-            
-            year = match.group(1)
-            
-            # Determine target folder
-            if is_screenshot:
-                folder_name = f"!Screenshots_{year}"
-            else:
-                folder_name = f"!ScreenRecorder_{year}"
-            
-            # Create folder
-            base = self.base_path.get()
-            year_folder = os.path.join(base, year)
-            target_folder = os.path.join(year_folder, folder_name)
-            
-            try:
-                os.makedirs(target_folder, exist_ok=True)
-                
-                # Move file
-                dest_path = os.path.join(target_folder, filename)
-                shutil.move(file_info['filepath'], dest_path)
-                
-                # Remove from list
-                self.root_files.remove(file_info)
-                count += 1
-                
-            except Exception as e:
-                print(f"Error moving {filename}: {e}")
-        
-        self.update_ui()
-        messagebox.showinfo("Auto-organize", f"{count} file(s) automatically organized")
-
-    def apply_changes(self):
-        """Apply file moves"""
-        if not self.root_files:
-            messagebox.showinfo("Info", "No files to apply")
-            return
-
-        base = self.base_path.get()
-        moved = 0
-        errors = []
-
-        for file_info in self.root_files[:]:
-            filename = file_info['filename']
-            
-            if filename not in self.file_data:
-                continue
-            
-            data = self.file_data[filename]
-            
-            if not data.get('path_final') or data['path_final'].startswith('⚠️'):
-                continue
-            
-            # Build full path
-            year = data['year']
-            folder_name = data['folder_name']
-            
-            year_folder = os.path.join(base, year)
-            target_folder = os.path.join(year_folder, folder_name)
-            target_path = os.path.join(target_folder, filename)
-            
-            try:
-                # Create folders
-                os.makedirs(target_folder, exist_ok=True)
-                
-                # Handle collision
-                final_path = target_path
-                counter = 1
-                while os.path.exists(final_path):
-                    name, ext = os.path.splitext(filename)
-                    final_path = os.path.join(target_folder, f"{name}_{counter}{ext}")
-                    counter += 1
-                
-                # Move file
-                shutil.move(file_info['filepath'], final_path)
-                
-                # Remove from list
-                self.root_files.remove(file_info)
+                safe_move(s, dst)
                 moved += 1
-                
-            except Exception as e:
-                errors.append(f"{filename}: {e}")
-        
-        self.update_ui()
-        
-        msg = f"{moved} file(s) moved"
-        if errors:
-            msg += f"\n{len(errors)} error(s)"
-        
-        messagebox.showinfo("Apply", msg)
+        except Exception as e:
+            log(f"❌ Merge error {entry}: {e}")
+            errors += 1
+    try:
+        if not os.listdir(src):
+            os.rmdir(src)
+    except Exception:
+        pass
+    return moved, dups, errors
 
-    def delete_selected(self):
-        """Delete selected files and select next"""
-        selection = self.tree.selection()
-        if not selection:
-            return
 
-        filenames = []
-        item_ids = []
-        for item_id in selection:
-            values = self.tree.item(item_id, 'values')
-            filename = values[0]  # Original name
-            
-            filenames.append(filename)
-            item_ids.append(item_id)
+def pil_to_qimage(img):
+    """PIL -> QImage. Safe to call from a worker thread (QPixmap is not)."""
+    img = img.convert('RGBA')
+    data = img.tobytes('raw', 'RGBA')
+    qimg = QImage(data, img.width, img.height, img.width * 4, QImage.Format.Format_RGBA8888)
+    return qimg.copy()          # detach from the Python buffer
 
-        deleted = 0
-        errors = 0
 
-        # Remember index of first selected item
-        first_item = item_ids[0]
-        all_items = self.tree.get_children()
-        first_index = all_items.index(first_item) if first_item in all_items else 0
+def pil_to_pixmap(img):
+    return QPixmap.fromImage(pil_to_qimage(img))
 
-        for filename in filenames:
+
+# Longest side we decode previews at: far cheaper than a 50 Mpx original and
+# still sharper than any screen once zoomed a bit.
+PREVIEW_MAX = 1800
+PREVIEW_CACHE_MAX = 8       # decoded images kept in RAM (current + neighbours)
+THUMB_MAX = 240             # grid thumbnails in the viewer tab
+THUMB_W, THUMB_H = 200, 150  # every cell gets exactly this, so the grid lines up
+THUMB_WORKERS = 4
+THUMB_CACHE_MAX = 800        # framed thumbnails kept in RAM
+
+
+def load_preview_qimage(path, max_side=PREVIEW_MAX):
+    """Decode an image for display, downscaled during decoding.
+    JPEG draft mode lets libjpeg skip most of the work, which is what makes
+    stepping through a folder feel instant instead of chugging."""
+    if not PIL_AVAILABLE:
+        return None
+    try:
+        img = Image.open(path)
+        try:
+            img.draft('RGB', (max_side, max_side))         # no-op for non-JPEG
+        except Exception:
+            pass
+        img.thumbnail((max_side, max_side), RESAMPLE_FAST)
+        qimg = pil_to_qimage(img)
+        img.close()
+        return qimg
+    except Exception as e:
+        log(f"❌ Preview {os.path.basename(path)}: {e}")
+        return None
+
+
+def propose_folder_name(year, folder):
+    """Return (proposed_name, status). status: 'ok' | 'auto' | 'manual' | 'move'"""
+    m = re.match(r'^(20\d{2})', folder)
+    if m and m.group(1) != year:
+        # Correctly named but sitting in the wrong year folder -> propose moving it
+        return folder, 'move'
+    if folder.startswith(year):
+        return '', 'ok'
+    other_years = [y for y in re.findall(r'20\d{2}', folder) if y != year]
+    if other_years:
+        return '', 'manual'
+
+    m = re.match(r'^(\d{1,2})[\s\-]+(\d{1,2})\s+(.+)$', folder)
+    if m and 1 <= int(m.group(1)) <= 12 and 1 <= int(m.group(2)) <= 31:
+        new_name = f"{year}-{int(m.group(1)):02d}-{int(m.group(2)):02d} {m.group(3)}"
+    else:
+        m = re.match(r'^(\d{1,2})\s*-\s*(.+)$', folder)
+        if m and 1 <= int(m.group(1)) <= 12:
+            new_name = f"{year}-{int(m.group(1)):02d} {m.group(2)}"
+        else:
+            new_name = f"{year}-{folder}"
+
+    new_name = new_name[:7] + new_name[7:].replace(year, '')
+    new_name = re.sub(r'\s{2,}', ' ', new_name).strip().rstrip('-').strip()
+    return new_name, 'auto'
+
+
+def count_files(path):
+    """Recursive file count"""
+    total = 0
+    try:
+        for _, _, files in os.walk(path):
+            total += len(files)
+    except Exception:
+        pass
+    return total
+
+
+STOP_WORDS = ('janvier', 'fevrier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet',
+              'aout', 'août', 'septembre', 'octobre', 'novembre', 'decembre', 'décembre',
+              'le', 'la', 'les', 'de', 'du', 'des', 'et')
+
+
+def name_similarity(a, b):
+    """Similarity of folder names ignoring digits/punctuation/filler words (0..1)"""
+    def norm(s):
+        s = s.lower()
+        for w in STOP_WORDS:
+            s = re.sub(rf'\b{w}\b', '', s)
+        return re.sub(r'[^a-z]', '', s)
+    na, nb = norm(a), norm(b)
+    if not na or not nb:
+        return 0.0
+    return difflib.SequenceMatcher(None, na, nb).ratio()
+
+
+def load_folder_exclusions():
+    """Pairs of folder names never to flag as duplicates (one 'nameA <> nameB' per line)"""
+    pairs = set()
+    try:
+        if os.path.exists(EXCLUSION_FILE):
+            with open(EXCLUSION_FILE, 'r', encoding='utf-8') as f:
+                for line in f:
+                    parts = [p.strip() for p in line.split('<>')]
+                    if len(parts) == 2 and all(parts):
+                        pairs.add(tuple(sorted(parts)))
+    except Exception as e:
+        log(f"❌ Error loading {os.path.basename(EXCLUSION_FILE)}: {e}")
+    return pairs
+
+
+def save_folder_exclusion(a, b):
+    try:
+        with open(EXCLUSION_FILE, 'a', encoding='utf-8') as f:
+            f.write(f"{a} <> {b}\n")
+    except Exception as e:
+        log(f"❌ Error saving exclusion: {e}")
+
+
+def month_of(name, year):
+    """Month in 'YEAR-MM...' name, else None"""
+    m = re.match(rf'^{year}-(\d{{2}})', name)
+    return m.group(1) if m else None
+
+
+# Row colors (dark theme)
+COLOR_AUTO = QColor('#1f4d2e')
+COLOR_MANUAL = QColor('#4d3d1f')
+COLOR_DONE = QColor('#1f334d')
+COLOR_CONFLICT = QColor('#4d1f1f')
+COLOR_OK_FG = QColor('#888888')
+
+# Diff highlighting for the duplicate captions
+DIFF_STYLE = "background-color:#8a5a00; color:#ffe08a; font-weight:bold; padding:0 2px;"
+SAME_STYLE = "color:#8a8a8a;"
+
+
+def _esc(s):
+    return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+
+def _dim(s):
+    return f'<span style="{SAME_STYLE}">{_esc(s)}</span>' if s else ''
+
+
+def _hot(s):
+    return f'<span style="{DIFF_STYLE}">{_esc(s)}</span>' if s else ''
+
+
+def _char_diff(a, b):
+    """Character-level diff of two strings -> (html_a, html_b).
+    Only the characters that actually differ are highlighted, so 'photo_1.jpg'
+    vs 'photo.jpg' lights up the '_1' and nothing else. When the two strings are
+    too far apart (two unrelated folder names), highlighting a few shared letters
+    would just produce confetti, so the whole segment is highlighted instead."""
+    ops = difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes()
+    changed = sum((i2 - i1) + (j2 - j1) for tag, i1, i2, j1, j2 in ops if tag != 'equal')
+    if changed > max(6, 0.3 * max(len(a), len(b))):
+        return _hot(a), _hot(b)
+    out_a, out_b = [], []
+    for tag, i1, i2, j1, j2 in ops:
+        if tag == 'equal':
+            out_a.append(_dim(a[i1:i2]))
+            out_b.append(_dim(b[j1:j2]))
+        else:
+            out_a.append(_hot(a[i1:i2]))
+            out_b.append(_hot(b[j1:j2]))
+    return ''.join(out_a), ''.join(out_b)
+
+
+def diff_path_html(rel_a, rel_b):
+    """Compare two relative paths and return (html_a, html_b) with only the
+    differences highlighted: whole segments when a folder is replaced, and
+    down to the character when two segments merely differ (a '_1' suffix, a
+    changed digit...). Everything identical stays dimmed."""
+    parts_a = re.split(r'[\\/]', rel_a)
+    parts_b = re.split(r'[\\/]', rel_b)
+    out_a, out_b = [], []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, parts_a, parts_b).get_opcodes():
+        if tag == 'equal':
+            out_a.extend(_dim(p) for p in parts_a[i1:i2])
+            out_b.extend(_dim(p) for p in parts_b[j1:j2])
+        elif tag == 'replace' and (i2 - i1) == (j2 - j1):
+            # Same number of segments on both sides: compare them pairwise, char by char
+            for pa, pb in zip(parts_a[i1:i2], parts_b[j1:j2]):
+                ha, hb = _char_diff(pa, pb)
+                out_a.append(ha)
+                out_b.append(hb)
+        else:
+            out_a.extend(_hot(p) for p in parts_a[i1:i2])
+            out_b.extend(_hot(p) for p in parts_b[j1:j2])
+    sep = f'<span style="{SAME_STYLE}">\\</span>'
+    return sep.join(out_a), sep.join(out_b)
+
+
+# Markers Windows / phones / sync tools append when they duplicate a file:
+#   photo_1.jpg   photo (1).jpg   photo - Copie.jpg   photo copy 2.jpg   photo~1.jpg
+COPY_SUFFIX_RE = re.compile(
+    r'^(?P<base>.+?)'
+    r'(?:'
+    r'[ _\-~]?\((?P<paren>\d{1,3})\)'                      # (1)  _(1)  -(1)
+    r'|[ _\-~](?P<num>\d{1,3})'                            # _1   -1   ~1   " 1"
+    r'|[ _\-]?(?:copie|copy|kopie|copia)(?:[ _\-]?\d{1,3})?'   # - Copie, _copy, copy 2
+    r')$',
+    re.IGNORECASE)
+
+
+def copy_original_name(filename):
+    """If filename looks like a copy of another file ('x_1.jpg' -> 'x.jpg'),
+    return the original name, else None. Used to auto-flag same-folder copies."""
+    stem, ext = os.path.splitext(filename)
+    if not ext:
+        return None
+    m = COPY_SUFFIX_RE.match(stem)
+    if not m:
+        return None
+    base = m.group('base').rstrip(' _-~')
+    if not base:
+        return None
+    return base + ext
+
+
+# ==================== VIDEO PREVIEW ====================
+
+# Frames sampled for the video slideshow, as a fraction of the total duration
+VIDEO_SAMPLE_POINTS = (0.10, 0.30, 0.50, 0.70, 0.90)
+VIDEO_SLIDE_MS = 900
+VIDEO_CACHE_MAX = 12
+
+NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+
+
+# Local ffmpeg install. Override with "ffmpeg_dir" in the config file.
+DEFAULT_FFMPEG_DIR = r"P:\a-PC\a-Prg\Video\ffmpeg"
+
+FFMPEG = FFPROBE = None
+FFMPEG_TRIED = []
+
+
+def _exe_in(folder, name):
+    """Look for name(.exe) in folder, folder/bin, folder/*/bin (unpacked release layout)"""
+    if not folder or not os.path.isdir(folder):
+        return None
+    exe = name + ('.exe' if os.name == 'nt' else '')
+    candidates = [os.path.join(folder, exe), os.path.join(folder, 'bin', exe)]
+    try:
+        for sub in os.listdir(folder):
+            sub_path = os.path.join(folder, sub)
+            if os.path.isdir(sub_path):
+                candidates.append(os.path.join(sub_path, exe))
+                candidates.append(os.path.join(sub_path, 'bin', exe))
+    except OSError:
+        pass
+    for c in candidates:
+        FFMPEG_TRIED.append(c)
+        if os.path.isfile(c):
+            return c
+    return None
+
+
+def resolve_ffmpeg(extra_dir=None):
+    """Locate ffmpeg/ffprobe and set the globals. Search order:
+    configured folder -> script folder -> PATH -> imageio-ffmpeg wheel."""
+    global FFMPEG, FFPROBE, FFMPEG_TRIED
+    FFMPEG_TRIED = []
+    ffmpeg = ffprobe = None
+    here = os.path.dirname(os.path.abspath(__file__))
+    for folder in (extra_dir, DEFAULT_FFMPEG_DIR, here):
+        ffmpeg = ffmpeg or _exe_in(folder, 'ffmpeg')
+        ffprobe = ffprobe or _exe_in(folder, 'ffprobe')
+        if ffmpeg and ffprobe:
+            break
+    ffmpeg = ffmpeg or shutil.which('ffmpeg')
+    ffprobe = ffprobe or shutil.which('ffprobe')
+    if not ffmpeg:
+        try:
+            import imageio_ffmpeg
+            ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            pass
+    FFMPEG, FFPROBE = ffmpeg, ffprobe
+    return ffmpeg, ffprobe
+
+
+resolve_ffmpeg()
+
+
+def video_duration(path):
+    """Duration in seconds, via ffprobe or by parsing ffmpeg's banner. None if unknown."""
+    if FFPROBE:
+        try:
+            r = subprocess.run([FFPROBE, '-v', 'error', '-show_entries', 'format=duration',
+                                '-of', 'default=noprint_wrappers=1:nokey=1', path],
+                               capture_output=True, text=True, timeout=15,
+                               creationflags=NO_WINDOW)
+            return float(r.stdout.strip())
+        except Exception:
+            pass
+    if FFMPEG:
+        try:
+            r = subprocess.run([FFMPEG, '-i', path], capture_output=True, text=True,
+                               timeout=15, creationflags=NO_WINDOW)
+            m = re.search(r'Duration:\s*(\d+):(\d\d):(\d\d\.\d+)', r.stderr or '')
+            if m:
+                return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+        except Exception:
+            pass
+    return None
+
+
+def extract_video_jpgs(path, temp_dir, duration=None):
+    """Sample the video into jpgs in temp_dir. Returns [(percent, jpg_path), ...].
+    Pure file/subprocess work - no Qt - so a background thread can call it.
+    Frames already on disk are reused, so the UI and the background pass share them."""
+    if not FFMPEG:
+        return []
+    if duration is None:
+        duration = video_duration(path)
+    if not duration or duration <= 0:
+        return []
+    try:
+        os.makedirs(temp_dir, exist_ok=True)
+    except Exception:
+        return []
+    key = f"{zlib.crc32(path.encode('utf-8')):08x}"
+    shots = []
+    for point in VIDEO_SAMPLE_POINTS:
+        pct = int(point * 100)
+        out = os.path.join(temp_dir, f"slide_{key}_{pct:02d}.jpg")
+        if not os.path.exists(out):
             try:
-                # Find file
-                for file_info in self.root_files[:]:
-                    if file_info['filename'] == filename:
-                        filepath = file_info['filepath']
-                        
-                        # Normalize path for send2trash (avoid \\?\ issues)
-                        normalized_path = os.path.normpath(filepath)
-                        
-                        # Send to trash
-                        try:
-                            from send2trash import send2trash
-                            send2trash(normalized_path)
-                        except ImportError:
-                            # Fallback if send2trash not installed
-                            os.remove(normalized_path)
-                        except Exception as e:
-                            # If send2trash fails, try direct delete
-                            print(f"send2trash failed, direct delete: {e}")
-                            os.remove(normalized_path)
-                        
-                        self.root_files.remove(file_info)
-                        
-                        # Remove from file_data too
-                        if filename in self.file_data:
-                            del self.file_data[filename]
-                        
-                        deleted += 1
-                        break
+                subprocess.run([FFMPEG, '-ss', f"{duration * point:.3f}", '-i', path,
+                                '-frames:v', '1', '-q:v', '3', '-y', out],
+                               capture_output=True, timeout=25, creationflags=NO_WINDOW)
+            except Exception:
+                continue
+        if os.path.exists(out):
+            shots.append((pct, out))
+    return shots
+
+
+DEFAULT_SHOT_PCT = 25       # the only frame extracted up front; the others on demand
+
+
+def shot_path(video_path, cache_dir, pct):
+    """Where the screenshot at this percentage lives (existing or not)"""
+    if not cache_dir:
+        return None
+    key = f"{zlib.crc32(video_path.encode('utf-8')):08x}"
+    return os.path.join(cache_dir, f"{key}_{pct:03d}.jpg")
+
+
+def grab_one_shot(video_path, cache_dir, pct, duration=None):
+    """Extract a single frame: one ffmpeg call. No Qt, so a worker can call it."""
+    out = shot_path(video_path, cache_dir, pct)
+    if not FFMPEG or not out:
+        return None
+    if os.path.exists(out):
+        return out
+    if duration is None:
+        duration = video_duration(video_path)
+    if not duration or duration <= 0:
+        return None
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        ts = max(0, duration - 0.5) if pct >= 100 else (duration * pct) / 100
+        subprocess.run([FFMPEG, '-ss', str(ts), '-i', video_path, '-frames:v', '1',
+                        '-q:v', '2', '-y', out],
+                       capture_output=True, timeout=20, creationflags=NO_WINDOW)
+    except Exception:
+        return None
+    return out if os.path.exists(out) else None
+
+
+class PreviewLoader(QThread):
+    """Single worker that decodes previews off the GUI thread.
+    Newest request first: when you hold the arrow key down, the photo you
+    stopped on is decoded before the ones you flew past."""
+    image_ready = Signal(str, object)      # path, QImage
+    shot_ready = Signal(str, int, object)  # video path, percent, jpg path
+    thumb_ready = Signal(str, object)      # media path, small QImage
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._jobs = []                   # used as a stack
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+        self._stop = False
+        self._seen = set()
+
+    def request(self, kind, path, extra=None):
+        key = (kind, path, extra)      # same video at 50 % is a different job
+        with self._lock:
+            if key in self._seen:
+                return
+            self._seen.add(key)
+            self._jobs.append((kind, path, extra))
+        self._wake.set()
+
+    def clear_pending(self):
+        """Drop everything not started yet (the user moved on)"""
+        with self._lock:
+            self._jobs.clear()
+            self._seen.clear()
+
+    def stop(self):
+        self._stop = True
+        self._wake.set()
+
+    def run(self):
+        while not self._stop:
+            with self._lock:
+                job = self._jobs.pop() if self._jobs else None
+            if job is None:
+                self._wake.wait(0.15)
+                self._wake.clear()
+                continue
+            kind, path, extra = job
+            try:
+                if kind == 'image':
+                    img = load_preview_qimage(path)
+                    if img is not None and not self._stop:
+                        self.image_ready.emit(path, img)
+                elif kind == 'shot':
+                    cache_dir, pct = extra
+                    jpg = grab_one_shot(path, cache_dir, pct)
+                    if not self._stop:
+                        self.shot_ready.emit(path, pct, jpg)
+                elif kind == 'thumb':
+                    source = path
+                    if os.path.splitext(path)[1].lower() in VIDEO_EXTS:
+                        source = grab_one_shot(path, extra, DEFAULT_SHOT_PCT)
+                    img = load_preview_qimage(source, THUMB_MAX) if source else None
+                    if not self._stop:
+                        self.thumb_ready.emit(path, img)
             except Exception as e:
-                print(f"Error deleting {filename}: {e}")
-                errors += 1
+                log(f"❌ Preview worker {os.path.basename(path)}: {e}")
+            finally:
+                with self._lock:
+                    self._seen.discard((kind, path, extra))
 
-        # Delete rows from TreeView WITHOUT rebuilding all
-        for item_id in item_ids:
-            self.tree.delete(item_id)
-        
-        # Select next file
-        all_items = self.tree.get_children()
-        if all_items:
-            # Select at previous index, or last if overflow
-            next_index = min(first_index, len(all_items) - 1)
-            next_item = all_items[next_index]
-            self.tree.selection_set(next_item)
-            self.tree.focus(next_item)
-            self.tree.see(next_item)
-            # Trigger display
-            self.on_tree_select(None)
-        
-        # Set focus back on TreeView
-        self.tree.focus_set()
-        
-        # Discreet message in status bar
-        self.status_var.set(f"🗑️ {deleted} file(s) deleted" + (f" - {errors} error(s)" if errors > 0 else ""))
 
-    def reset_tree(self):
-        """Reset tree"""
-        if messagebox.askyesno("Confirmation", "Reset all fields?"):
-            self.update_ui()
+class PrefetchWorker(QThread):
+    """Warms ONE frame per video - the 25 % one shown on selection. Extracting
+    all eleven up front cost far more than it saved."""
+    advanced = Signal(int, int)
 
-    def refresh_folders_listbox(self, year=None):
-        """Refresh listbox with folders for specified year"""
-        self.folders_listbox.delete(0, tk.END)
-        
-        if not year:
-            self.folders_year_label.configure(text="📁 Folders")
-            return
-        
-        # Update label
-        self.folders_year_label.configure(text=f"📁 Folders {year}")
-        
-        # Get folders for this year only
-        base = self.base_path.get()
-        year_folder = os.path.join(base, year)
-        
-        if not os.path.exists(year_folder):
-            return
-        
-        folders = []
+    def __init__(self, videos, cache_dir, pct=DEFAULT_SHOT_PCT, parent=None):
+        super().__init__(parent)
+        self.videos = videos
+        self.cache_dir = cache_dir
+        self.pct = pct
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
+
+    def run(self):
+        for i, path in enumerate(self.videos):
+            if self._stop:
+                return
+            try:
+                grab_one_shot(path, self.cache_dir, self.pct)
+            except Exception:
+                pass
+            self.advanced.emit(i + 1, len(self.videos))
+
+
+def setup_header(table, widths, sortable=True):
+    """Columns the user can widen, reorder and sort. Qt keeps logical indices
+    stable when a column is dragged, so the code below can stay index-based."""
+    h = table.horizontalHeader()
+    h.setSectionsMovable(True)
+    h.setSectionsClickable(True)
+    h.setStretchLastSection(False)
+    h.setMinimumSectionSize(40)
+    for i, w in enumerate(widths):
+        h.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
+        table.setColumnWidth(i, w)
+    h.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    if sortable:
+        table.setSortingEnabled(True)
+        h.setSortIndicatorShown(True)
+
+
+class SortableItem(QTableWidgetItem):
+    """Table cell that sorts on a key instead of its label, so '🟢 100 %'
+    and '🔴 45 %' order by score and not by emoji."""
+
+    def __init__(self, text, key=None):
+        super().__init__(text)
+        self.sort_key = key
+
+    def __lt__(self, other):
+        mine = self.sort_key
+        theirs = getattr(other, 'sort_key', None)
+        if mine is None or theirs is None:
+            return self.text() < other.text()
         try:
-            for item in os.listdir(year_folder):
-                item_path = os.path.join(year_folder, item)
-                if os.path.isdir(item_path) and not item.startswith('!'):
-                    folders.append(item)
-        except Exception as e:
-            print(f"Error reading {year_folder}: {e}")
-        
-        # Add to listbox sorted, and assign colors
-        for folder in sorted(folders):
-            # Assign color if not already assigned
-            if folder not in self.folder_colors:
-                self.folder_colors[folder] = self.generate_color_from_name(folder)
-            
-            # Add to listbox
-            self.folders_listbox.insert(tk.END, folder)
-            
-            # Color the item (Tkinter Listbox doesn't support per-item colors natively)
-            # Workaround: use itemconfig with bg
-            idx = self.folders_listbox.size() - 1
-            color = self.folder_colors[folder]
-            self.folders_listbox.itemconfig(idx, bg=color)
+            return mine < theirs
+        except TypeError:
+            return str(mine) < str(theirs)
 
-    def on_folder_select(self, event):
-        """When clicking a folder, apply to selected rows"""
-        selection = self.folders_listbox.curselection()
-        if not selection:
+
+class ThumbPool(QObject):
+    """Several worker threads pulling from one queue: thumbnails appear almost
+    at once instead of trickling in from a single decoder."""
+    ready = Signal(str, object)      # media path, QImage
+
+    def __init__(self, cache_dir_getter, workers=THUMB_WORKERS, parent=None):
+        super().__init__(parent)
+        self._queue = deque()
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+        self._stop = False
+        self._generation = 0
+        self._cache_dir_getter = cache_dir_getter
+        # QThread rather than threading.Thread: signals emitted from a QThread are
+        # queued to the GUI thread by Qt itself, which is the supported path.
+        self._threads = [_PoolThread(self) for _ in range(max(1, workers))]
+        for t in self._threads:
+            t.start()
+
+    def submit(self, paths):
+        """Replace the queue: switching folder must not wait for the previous one"""
+        with self._lock:
+            self._generation += 1
+            gen = self._generation
+            self._queue.clear()
+            self._queue.extend((gen, p) for p in paths)
+        self._wake.set()
+
+    def stop(self):
+        self._stop = True
+        self._wake.set()
+        for t in self._threads:
+            t.wait(1500)
+
+    def _run(self):
+        while not self._stop:
+            with self._lock:
+                job = self._queue.popleft() if self._queue else None
+                current = self._generation
+            if job is None:
+                self._wake.wait(0.1)
+                self._wake.clear()
+                continue
+            gen, path = job
+            if gen != current:
+                continue            # belongs to a folder you already left
+            try:
+                source = path
+                if os.path.splitext(path)[1].lower() in VIDEO_EXTS:
+                    source = grab_one_shot(path, self._cache_dir_getter(), DEFAULT_SHOT_PCT)
+                img = load_preview_qimage(source, THUMB_MAX) if source else None
+                if img is not None and not self._stop and gen == self._generation:
+                    self.ready.emit(path, img)
+            except Exception as e:
+                log(f"❌ Vignette {os.path.basename(path)}: {e}")
+
+
+class _PoolThread(QThread):
+    def __init__(self, pool):
+        super().__init__(pool)
+        self.pool = pool
+
+    def run(self):
+        self.pool._run()
+
+
+def month_floor(dt):
+    return dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def add_months(dt, n):
+    month = dt.month - 1 + n
+    return dt.replace(year=dt.year + month // 12, month=month % 12 + 1)
+
+
+def timeline_ticks(lo, hi):
+    """Graduations matching the span: hours, days, months or years"""
+    span = (hi - lo).total_seconds()
+    ticks = []
+    day = 86400
+    if span <= 2 * day:
+        step = 3600 * (1 if span <= 6 * 3600 else 3 if span <= 12 * 3600 else 6)
+        t = lo.replace(minute=0, second=0, microsecond=0)
+        while t <= hi:
+            if t >= lo:
+                ticks.append((t, t.strftime('%Hh')))
+            t += timedelta(seconds=step)
+    elif span <= 45 * day:
+        step_days = 1 if span <= 10 * day else 7
+        t = lo.replace(hour=0, minute=0, second=0, microsecond=0)
+        while t <= hi:
+            if t >= lo:
+                ticks.append((t, t.strftime('%d/%m')))
+            t += timedelta(days=step_days)
+    elif span <= 800 * day:
+        step_months = 1 if span <= 400 * day else 3      # a full year -> 12 months
+        t = month_floor(lo)
+        while t <= hi:
+            if t >= lo:
+                ticks.append((t, t.strftime('%b %y')))
+            t = add_months(t, step_months)
+    else:
+        years = max(1, round(span / (365 * day) / 8))
+        t = lo.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+        while t <= hi:
+            if t >= lo:
+                ticks.append((t, t.strftime('%Y')))
+            t = t.replace(year=t.year + years)
+    return ticks
+
+
+class Timeline(QWidget):
+    """One dot per media, placed on a time axis running from the oldest to the
+    newest of the folder. Clicking a dot selects the corresponding thumbnail."""
+    picked = Signal(int)
+
+    MARGIN = 52
+    HEIGHT = 92
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.points = []          # [(datetime, label), ...] in display order
+        self.selected = -1
+        self.year_mode = False    # False = fit the folder, True = 01/01 -> 31/12
+        self.year = None
+        self.setFixedHeight(self.HEIGHT)
+        self.setMouseTracking(True)
+        self.setToolTip("")
+
+    def set_points(self, points, year=None):
+        self.points = points
+        self.selected = -1
+        if year:
+            self.year = year
+        self.update()
+
+    def set_year_mode(self, enabled, year=None):
+        self.year_mode = bool(enabled)
+        if year:
+            self.year = year
+        self.update()
+
+    def set_selected(self, index):
+        self.selected = index
+        self.update()
+
+    def _span(self):
+        dates = [d for d, _ in self.points if d]
+        if not dates:
+            return None, None
+        if self.year_mode:
+            year = None
+            try:
+                year = int(self.year)
+            except (TypeError, ValueError):
+                year = max(dates).year
+            return (datetime(year, 1, 1, 0, 0, 0),
+                    datetime(year, 12, 31, 23, 59, 59))
+        return min(dates), max(dates)
+
+    def _x_for(self, dt, lo, hi):
+        usable = max(1, self.width() - 2 * self.MARGIN)
+        if hi == lo:
+            return self.MARGIN + usable / 2
+        return self.MARGIN + usable * ((dt - lo).total_seconds() / (hi - lo).total_seconds())
+
+    def _index_at(self, x, y):
+        lo, hi = self._span()
+        if lo is None or abs(y - self.HEIGHT // 2) > 18:
+            return -1
+        best, best_dist = -1, 12
+        for i, (dt, _label) in enumerate(self.points):
+            if not dt:
+                continue
+            d = abs(self._x_for(dt, lo, hi) - x)
+            if d < best_dist:
+                best, best_dist = i, d
+        return best
+
+    def mousePressEvent(self, event):
+        i = self._index_at(event.position().x(), event.position().y())
+        if i >= 0:
+            self.picked.emit(i)
+
+    def mouseMoveEvent(self, event):
+        i = self._index_at(event.position().x(), event.position().y())
+        if i >= 0:
+            dt, label = self.points[i]
+            self.setToolTip(f"{label}\n{dt.strftime('%d/%m/%Y %H:%M:%S')}")
+        else:
+            self.setToolTip("")
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        mid = self.HEIGHT // 2
+        lo, hi = self._span()
+        painter.setPen(QPen(QColor('#4a4b50'), 2))
+        painter.drawLine(self.MARGIN, mid, self.width() - self.MARGIN, mid)
+        if lo is None:
+            painter.setPen(QColor('#8a8a8a'))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
+                             "Aucune date exploitable")
             return
-        
-        folder_name = self.folders_listbox.get(selection[0])
-        
-        # Apply to selected TreeView rows
-        tree_selection = self.tree.selection()
-        if not tree_selection:
-            messagebox.showinfo("Info", "Select files to organize first")
-            self.tree.focus_set()
+        # Graduations
+        font = painter.font()
+        font.setPointSize(7)
+        painter.setFont(font)
+        for tick, label in timeline_ticks(lo, hi):
+            x = self._x_for(tick, lo, hi)
+            painter.setPen(QPen(QColor('#3a3b40'), 1))
+            painter.drawLine(QPointF(x, mid - 8), QPointF(x, mid + 8))
+            painter.setPen(QColor('#7c7e85'))
+            width = painter.fontMetrics().horizontalAdvance(label)
+            painter.drawText(QPointF(x - width / 2, mid - 13), label)
+        # Dots
+        for i, (dt, _label) in enumerate(self.points):
+            if not dt:
+                continue
+            x = self._x_for(dt, lo, hi)
+            if i == self.selected:
+                painter.setBrush(QColor('#ffd479'))
+                painter.setPen(QPen(QColor('#ffffff'), 1))
+                painter.drawEllipse(QPointF(x, mid), 6.5, 6.5)
+            else:
+                painter.setBrush(QColor(120, 180, 255, 190))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawEllipse(QPointF(x, mid), 3.6, 3.6)
+        # Bounds
+        painter.setPen(QColor('#b9bbc0'))
+        font.setPointSize(8)
+        painter.setFont(font)
+        span_days = max(0, (hi - lo).days)
+        fmt = '%d/%m/%Y' if span_days else '%d/%m/%Y %H:%M'
+        painter.drawText(4, mid + 26, lo.strftime(fmt))
+        right = hi.strftime(fmt)
+        painter.drawText(self.width() - painter.fontMetrics().horizontalAdvance(right) - 4,
+                         mid + 26, right)
+        dates = [d for d, _ in self.points if d]
+        title = f"{len(dates)} média(s)"
+        if self.year_mode:
+            title += f" — vue année {lo.year}"
+        elif dates:
+            real = max(dates) - min(dates)
+            title += (f" — {real.days} jour(s)" if real.days
+                      else f" — {real.seconds // 60} min")
+        painter.setPen(QColor('#8a8a8a'))
+        painter.drawText(self.rect().adjusted(0, 2, 0, 0),
+                         Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, title)
+
+
+class ClickableLabel(QLabel):
+    """QLabel that reports double-clicks, so the preview opens the actual file"""
+    doubleClicked = Signal()
+
+    def mouseDoubleClickEvent(self, event):
+        self.doubleClicked.emit()
+        super().mouseDoubleClickEvent(event)
+
+
+# ==================== PERCEPTUAL COMPARISON ====================
+
+HASH_SIZE = 8            # dHash grid -> 64 bits
+SIM_IDENTICAL = 0.97     # visually the same shot
+SIM_CLOSE = 0.88         # same scene, re-encoded / cropped a bit
+SIM_RELATED = 0.72       # clearly related but not the same image
+
+RESAMPLE = 1
+if PIL_AVAILABLE:
+    RESAMPLE = getattr(getattr(Image, 'Resampling', Image), 'LANCZOS', 1)
+
+
+def dhash(img):
+    """Difference hash: 64 bits describing the image's gradients.
+    Robust to re-encoding and resizing, sensitive to a different shot."""
+    small = img.convert('L').resize((HASH_SIZE + 1, HASH_SIZE), RESAMPLE)
+    px = small.tobytes()   # mode 'L' -> one byte per pixel, row by row
+    bits = 0
+    for r in range(HASH_SIZE):
+        row = px[r * (HASH_SIZE + 1):(r + 1) * (HASH_SIZE + 1)]
+        for c in range(HASH_SIZE):
+            bits = (bits << 1) | (1 if row[c] < row[c + 1] else 0)
+    return bits
+
+
+def hash_similarity(h1, h2):
+    """1.0 = identical hashes, 0.0 = every bit differs"""
+    return 1.0 - (bin(h1 ^ h2).count('1') / (HASH_SIZE * HASH_SIZE))
+
+
+def hash_file(path):
+    """dHash of a still image, or None"""
+    if not PIL_AVAILABLE:
+        return None
+    try:
+        with Image.open(path) as img:
+            return dhash(img)
+    except Exception as e:
+        log(f"❌ Hash {os.path.basename(path)}: {e}")
+        return None
+
+
+def human_size(n):
+    if n is None:
+        return "?"
+    return f"{n / 1024:,.0f} Ko" if n < 1024 * 1024 else f"{n / 1048576:,.1f} Mo"
+
+
+def human_time(s):
+    if s is None:
+        return "?"
+    return f"{int(s // 60)}:{int(s % 60):02d}" if s >= 60 else f"{s:.1f} s"
+
+
+def fingerprint(path, temp_dir):
+    """Everything we need to judge a file: size, duration (videos), visual hashes.
+    No Qt inside - safe to call from a worker thread."""
+    fp = {'path': path, 'size': None, 'duration': None, 'hashes': [], 'kind': 'other'}
+    try:
+        fp['size'] = os.path.getsize(path)
+    except OSError:
+        return fp
+    ext = os.path.splitext(path)[1].lower()
+    if ext in VIDEO_EXTS:
+        fp['kind'] = 'video'
+        fp['duration'] = video_duration(path)
+        for _pct, jpg in extract_video_jpgs(path, temp_dir, fp['duration']):
+            h = hash_file(jpg)
+            if h is not None:
+                fp['hashes'].append(h)
+    elif ext in IMAGE_EXTS:
+        fp['kind'] = 'image'
+        h = hash_file(path)
+        if h is not None:
+            fp['hashes'].append(h)
+    return fp
+
+
+def compare_fingerprints(fa, fb, identical_bytes=False):
+    """Three tests - size, displayed content, duration for videos - merged into
+    one result dict. 'content' stays the headline: two files can weigh the same
+    and show something else entirely."""
+    res = {'size_a': fa['size'], 'size_b': fb['size'],
+           'dur_a': fa['duration'], 'dur_b': fb['duration'],
+           'content': None, 'size_ratio': None, 'dur_ratio': None,
+           'identical': identical_bytes, 'kind': fa['kind']}
+    if identical_bytes:
+        res['content'] = 1.0
+        res['size_ratio'] = 1.0
+        res['dur_ratio'] = 1.0
+        return res
+    if fa['size'] and fb['size']:
+        res['size_ratio'] = min(fa['size'], fb['size']) / max(fa['size'], fb['size'])
+    if fa['duration'] and fb['duration']:
+        res['dur_ratio'] = min(fa['duration'], fb['duration']) / max(fa['duration'], fb['duration'])
+    ha, hb = fa['hashes'], fb['hashes']
+    if ha and hb:
+        pairs = min(len(ha), len(hb))
+        res['content'] = sum(hash_similarity(ha[i], hb[i]) for i in range(pairs)) / pairs
+    return res
+
+
+def verdict_for(res):
+    """(emoji, short label, long label, css color) from a comparison result"""
+    if not res or res.get('content') is None:
+        return "❔", "?", "Comparaison impossible (fichier illisible)", "#8a8a8a"
+    score = res['content']
+    pct = f"{score * 100:.0f} %"
+    dur_off = res['dur_ratio'] is not None and res['dur_ratio'] < 0.98
+    if res.get('identical'):
+        return "🟢", "100 %", "Fichiers identiques octet pour octet — doublon certain", "#4ade80"
+    if dur_off and score >= SIM_CLOSE:
+        # Same imagery but one is longer: a trimmed or extended version, not a copy
+        return ("🟠", pct,
+                f"Images proches ({pct}) mais durées différentes "
+                f"({human_time(res['dur_a'])} vs {human_time(res['dur_b'])}) — versions distinctes",
+                "#fb923c")
+    if score >= SIM_IDENTICAL:
+        return "🟢", pct, f"Contenu identique ({pct}) — doublon confirmé", "#4ade80"
+    if score >= SIM_CLOSE:
+        return "🟡", pct, f"Très proche ({pct}) — même prise, encodage ou recadrage différent", "#fbbf24"
+    if score >= SIM_RELATED:
+        return "🟠", pct, f"Lié mais différent ({pct}) — à vérifier à l'œil", "#fb923c"
+    return "🔴", pct, f"Contenu différent ({pct}) — ce n'est pas un doublon", "#f87171"
+
+
+def verdict_details(res):
+    """One line summarising the three tests, for the tooltip and the verdict bar"""
+    if not res:
+        return ""
+    bits = []
+    sa, sb = res.get('size_a'), res.get('size_b')
+    if sa == sb and sa is not None:
+        bits.append(f"⚖️ taille identique ({human_size(sa)})")
+    else:
+        bits.append(f"⚖️ taille {human_size(sa)} vs {human_size(sb)}")
+    da, db = res.get('dur_a'), res.get('dur_b')
+    if da or db:
+        if da and db and abs(da - db) < 0.05:
+            bits.append(f"⏱️ durée identique ({human_time(da)})")
+        else:
+            bits.append(f"⏱️ durée {human_time(da)} vs {human_time(db)}")
+    c = res.get('content')
+    bits.append(f"🖼️ contenu {c * 100:.0f} %" if c is not None else "🖼️ contenu illisible")
+    return "   |   ".join(bits)
+
+
+class CompareWorker(QThread):
+    """Scores every pair in the background so the table fills up on its own.
+    Only does file IO, ffmpeg and PIL work - never touches Qt widgets."""
+    scored = Signal(int, dict)      # row token, result
+    progressed = Signal(int, int)   # done, total
+
+    def __init__(self, jobs, temp_dir, parent=None):
+        super().__init__(parent)
+        self.jobs = jobs            # [(token, path_a, path_b), ...]
+        self.temp_dir = temp_dir
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
+
+    def run(self):
+        cache = {}
+        for i, (token, pa, pb) in enumerate(self.jobs):
+            if self._stop:
+                return
+            try:
+                identical = False
+                if os.path.isfile(pa) and os.path.isfile(pb):
+                    try:
+                        identical = (os.path.getsize(pa) == os.path.getsize(pb)
+                                     and filecmp.cmp(pa, pb, shallow=False))
+                    except OSError:
+                        identical = False
+                for p in (pa, pb):
+                    if p not in cache:
+                        cache[p] = fingerprint(p, self.temp_dir)
+                res = compare_fingerprints(cache[pa], cache[pb], identical)
+            except Exception as e:
+                res = {'content': None, 'error': str(e)}
+            self.scored.emit(token, res)
+            self.progressed.emit(i + 1, len(self.jobs))
+
+
+# ==================== MAIN WINDOW ====================
+
+class TriPhotoWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("TriPhoto - Smart Photo Organizer")
+        self.resize(1500, 850)
+
+        # Config / state
+        self.config = load_json(CONFIG_FILE, {"camera_path": DEFAULT_CAMERA_PATH})
+        self.base_path = os.path.normpath(self.config.get("camera_path", DEFAULT_CAMERA_PATH))
+        self.ignore_list = set(load_json(IGNORE_FILE, []))
+        # ffmpeg: config folder wins, else the default install, else PATH
+        self.ffmpeg_dir = self.config.get('ffmpeg_dir', DEFAULT_FFMPEG_DIR)
+        if self.config.get('ffmpeg_dir') != self.ffmpeg_dir:
+            self.config['ffmpeg_dir'] = self.ffmpeg_dir
+            save_json(CONFIG_FILE, self.config)
+        resolve_ffmpeg(self.ffmpeg_dir)
+        self.files = []            # list of dicts: filename, filepath, ext, datetime, year, folder
+        self.dup_moves = {}        # {filename: [paths to move]}
+        self.current_screenshots = []
+        self.files_by_uid = {}     # uid -> entry of self.files (see fill_file_table)
+        self.dup_temp_files = []
+        self.current_dup_row = None
+        # Video slideshow state (duplicates tab)
+        self.slide_frames = [[], []]     # per side: [(percent, QPixmap, jpg_path), ...]
+        self.slide_index = 0
+        self.video_frame_cache = {}      # path -> frames
+        self.hash_cache = {}             # path -> [dHash, ...]
+        # Background comparison
+        self.row_token = 0
+        self.compare_results = {}        # token -> result dict
+        self.compare_worker = None
+        self.compare_done = 0
+        self.compare_total = 0
+        self.prefetch_worker = None
+        # Preview pipeline: decoded images kept in a small LRU, decoding done off-thread
+        self.preview_cache = OrderedDict()
+        self.loader = PreviewLoader(self)
+        self.current_shot_pct = DEFAULT_SHOT_PCT
+        self.loader.image_ready.connect(self.on_preview_ready)
+        self.loader.shot_ready.connect(self.on_shot_ready)
+        self.loader.thumb_ready.connect(self.on_thumb_ready)
+        # Viewer thumbnails: their own little pool, so a folder fills up at once
+        self.thumb_cache = OrderedDict()     # path -> QPixmap (already framed)
+        self.thumb_rows = {}
+        self._empty_thumb = None
+        self.thumb_pool = ThumbPool(lambda: self.video_cache_dir, parent=self)
+        self.thumb_pool.ready.connect(self.on_thumb_ready)
+        self.loader.start()
+        self.save_timer = QTimer(self)
+        self.save_timer.setSingleShot(True)
+        self.save_timer.timeout.connect(self.save_edits)
+        self.slide_timer = QTimer(self)
+        self.slide_timer.timeout.connect(self.advance_slideshow)
+        self.current_pixmap = None
+        self.current_filepath = None
+        self.zoom = 1.0
+        self._filling = False
+
+        self.video_cache_dir = os.path.join(self.base_path, '!tempvideoscreen') if os.path.isdir(self.base_path) else None
+
+        self.build_ui()
+        self.restore_column_layout()
+        log("=== TriPhoto started ===")
+        log(f"Python: {sys.executable}")
+        log(f"Camera folder: {self.base_path}")
+        if not PIL_AVAILABLE:
+            log("⚠️ Pillow indisponible - previews désactivées")
+        elif not HEIF_AVAILABLE:
+            log("⚠️ pillow-heif indisponible - previews HEIC/HEIF désactivées")
+        if FFMPEG:
+            log(f"🎬 ffmpeg: {FFMPEG}")
+            log(f"🎬 ffprobe: {FFPROBE}" if FFPROBE else "🎬 ffprobe: absent (durée lue via ffmpeg)")
+        else:
+            log("⚠️ ffmpeg introuvable - aucun aperçu vidéo.")
+            for c in FFMPEG_TRIED[:12]:
+                log(f"   testé: {c}")
+            log(f"   → mets le bon dossier dans \"ffmpeg_dir\" de {CONFIG_FILE}, "
+                f"ou pose ffmpeg.exe à côté du script, ou: pip install imageio-ffmpeg")
+
+        QTimer.singleShot(300, self.startup_load)
+
+    # ---------- UI ----------
+
+    def build_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        root_layout = QVBoxLayout(central)
+        root_layout.setContentsMargins(10, 10, 10, 10)
+
+        # Top bar: camera path
+        top = QHBoxLayout()
+        top.addWidget(QLabel("📁 Dossier Camera :"))
+        self.path_edit = QLineEdit(self.base_path)
+        self.path_edit.editingFinished.connect(self.on_path_edited)
+        top.addWidget(self.path_edit, stretch=1)
+        btn_browse = QPushButton("Parcourir…")
+        btn_browse.clicked.connect(self.browse_folder)
+        top.addWidget(btn_browse)
+        btn_scan = QPushButton("🔄 Recharger")
+        btn_scan.clicked.connect(self.startup_load)
+        top.addWidget(btn_scan)
+        root_layout.addLayout(top)
+
+        # Tabs
+        self.tabs = QTabWidget()
+        root_layout.addWidget(self.tabs, stretch=1)
+
+        self.tabs.addTab(self.build_rename_tab(), "1️⃣  Renommage")
+        self.tabs.addTab(self.build_dup_tab(), "2️⃣  Doublons")
+        self.tabs.addTab(self.build_sort_tab(), "3️⃣  Tri des médias")
+        self.tabs.addTab(self.build_viewer_tab(), "4️⃣  Visualiseur")
+        self.tabs.currentChanged.connect(self.on_tab_changed)
+
+        self.statusBar().showMessage("Prêt")
+
+    # ----- Tab 1: rename -----
+
+    def build_rename_tab(self):
+        w = QWidget()
+        layout = QVBoxLayout(w)
+
+        info = QLabel("Chaque dossier doit commencer par son année (ex : « 2015-11 Bruxelles WeekEnd »). "
+                      "Double-clic sur une proposition pour la modifier. Rien n'est renommé sans « Appliquer ». "
+                      "Si le dossier cible existe déjà, le contenu est fusionné (fichiers identiques → !duplicate).")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        btns = QHBoxLayout()
+        b_analyze = QPushButton("🔍 Analyser")
+        b_analyze.clicked.connect(self.analyze_renames)
+        btns.addWidget(b_analyze)
+        b_apply = QPushButton("✏️ Appliquer les renommages")
+        b_apply.clicked.connect(self.apply_renames)
+        btns.addWidget(b_apply)
+        b_fp = QPushButton("🙈 Faux positif (exclure)")
+        b_fp.clicked.connect(self.exclude_similar)
+        btns.addWidget(b_fp)
+        self.rename_summary = QLabel("")
+        btns.addWidget(self.rename_summary)
+        btns.addStretch(1)
+        layout.addLayout(btns)
+
+        self.rename_table = QTableWidget(0, 5)
+        self.rename_table.setHorizontalHeaderLabels(["Année", "Nom actuel", "Fichiers", "Proposition", "Statut"])
+        self.rename_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.rename_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.rename_table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
+        self.rename_table.verticalHeader().setVisible(False)
+        setup_header(self.rename_table, [70, 380, 130, 380, 130])
+        self.rename_table.itemChanged.connect(self.on_rename_item_changed)
+        self.rename_table.cellDoubleClicked.connect(self.on_rename_cell_double_clicked)
+        layout.addWidget(self.rename_table, stretch=1)
+        return w
+
+    def on_rename_cell_double_clicked(self, row, col):
+        """Empty proposition -> pre-fill with the current name before editing"""
+        if col != 3:
             return
-        
+        it = self.rename_table.item(row, 3)
+        if it and not it.text().strip():
+            self._filling = True
+            it.setText(self.rename_table.item(row, 1).text())
+            self._filling = False
+
+    def analyze_renames(self):
+        base = self.base_path
+        if not os.path.isdir(base):
+            log(f"❌ Camera folder not found: {base}")
+            return
+        self._filling = True
+        self.rename_table.setSortingEnabled(False)   # sorting while filling scrambles rows
+        self.rename_table.setRowCount(0)
+        self._folder_exclusions = load_folder_exclusions()  # reloaded each analysis (file is hand-editable)
+        ok_count = auto_count = manual_count = similar_count = 0
+        for item in sorted(os.listdir(base)):
+            year_path = os.path.join(base, item)
+            if not (os.path.isdir(year_path) and re.match(r'^\d{4}$', item)):
+                continue
+            # Collect folders of this year: [name, file_count, proposed, status]
+            entries = []
+            for folder in sorted(os.listdir(year_path)):
+                folder_path = os.path.join(year_path, folder)
+                if not os.path.isdir(folder_path) or folder.startswith('!'):
+                    continue
+                proposed, status = propose_folder_name(item, folder)
+                entries.append([folder, count_files(folder_path), proposed, status])
+
+            # Flag near-identical folder names within the same year (probable duplicates)
+            exclusions = self._folder_exclusions
+            ok_entries = [e for e in entries if e[3] == 'ok']
+            for i in range(len(ok_entries)):
+                for j in range(i + 1, len(ok_entries)):
+                    a, b = ok_entries[i], ok_entries[j]
+                    if a[3] != 'ok' or b[3] != 'ok':
+                        continue
+                    if tuple(sorted((a[0], b[0]))) in exclusions:
+                        continue
+                    ma, mb = month_of(a[0], item), month_of(b[0], item)
+                    if ma and mb and ma != mb:
+                        continue  # same name but different month = different events
+                    if name_similarity(a[0], b[0]) >= 0.8:
+                        small, big = (a, b) if a[1] <= b[1] else (b, a)
+                        small[2] = big[0]   # proposition: merge into the bigger one
+                        small[3] = 'similar'
+
+            for folder, nfiles, proposed, status in entries:
+                row = self.rename_table.rowCount()
+                self.rename_table.insertRow(row)
+                items = [QTableWidgetItem(item), QTableWidgetItem(folder),
+                         QTableWidgetItem(str(nfiles)), QTableWidgetItem(proposed),
+                         QTableWidgetItem('')]
+                items[2].setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                for col, it in enumerate(items):
+                    if col != 3:
+                        it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    self.rename_table.setItem(row, col, it)
+                if status == 'ok':
+                    ok_count += 1
+                    items[4].setText('✅ OK')
+                    for it in items:
+                        it.setForeground(COLOR_OK_FG)
+                elif status == 'similar':
+                    similar_count += 1
+                    items[4].setText('🔎 Doublon ?')
+                    # Remember the detected pair so 'Exclure' works even after edits
+                    items[1].setData(Qt.ItemDataRole.UserRole, proposed)
+                    for it in items:
+                        it.setBackground(COLOR_MANUAL)
+                elif status == 'move':
+                    auto_count += 1
+                    items[4].setText(f'📦 → {proposed[:4]}')
+                    for it in items:
+                        it.setBackground(COLOR_AUTO)
+                elif status == 'auto':
+                    auto_count += 1
+                    items[4].setText('🔄 Auto')
+                    for it in items:
+                        it.setBackground(COLOR_AUTO)
+                else:
+                    manual_count += 1
+                    items[4].setText('⚠️ Manuel')
+                    for it in items:
+                        it.setBackground(COLOR_MANUAL)
+        self._filling = False
+        self.rename_table.setSortingEnabled(True)
+        self.rename_summary.setText(f"✅ {ok_count} OK   |   🔄 {auto_count} auto   |   "
+                                    f"🔎 {similar_count} doublon(s) ?   |   ⚠️ {manual_count} à voir")
+        log(f"Rename analysis: {ok_count} OK, {auto_count} auto-detected, "
+            f"{similar_count} similar, {manual_count} manual")
+
+    def on_rename_item_changed(self, item):
+        if self._filling or item.column() != 3:
+            return
+        row = item.row()
+        status_item = self.rename_table.item(row, 4)
+        if status_item and item.text().strip():
+            log(f"✍️ Proposition: {self.rename_table.item(row, 1).text()} -> {item.text().strip()}")
+            self._filling = True
+            status_item.setText('✍️ Modifié')
+            for col in range(5):
+                it = self.rename_table.item(row, col)
+                if it:
+                    it.setBackground(COLOR_AUTO)
+            self._filling = False
+
+    def exclude_similar(self):
+        """Mark selected 🔎 rows as false positives (saved to FolderDoublonExclusion.txt)"""
+        rows = sorted({idx.row() for idx in self.rename_table.selectedIndexes()})
         count = 0
-        for item_id in tree_selection:
-            values = list(self.tree.item(item_id, 'values'))
-            filename = values[0]
-            
-            # Apply folder name
-            values[2] = folder_name
-            
-            # Update file_data
-            if filename in self.file_data:
-                self.file_data[filename]['folder_name'] = folder_name
-                
-                # Recalculate final path
-                self.update_path_final(filename, values)
-                
-                # Apply color (from listbox-defined color)
-                self.apply_folder_color(item_id, folder_name)
-                
-                # Update display
-                self.tree.item(item_id, values=values)
-                count += 1
-        
-        # Save edits
-        self.save_edits()
-        
-        self.status_var.set(f"📁 {count} file(s) → {folder_name}")
-        
-        # Set focus back on TreeView
-        self.tree.focus_set()
+        self._filling = True
+        for row in rows:
+            name_item = self.rename_table.item(row, 1)
+            partner = name_item.data(Qt.ItemDataRole.UserRole)
+            if not partner:
+                continue  # not a detected duplicate pair
+            a, b = sorted((name_item.text(), partner))
+            save_folder_exclusion(a, b)
+            log(f"🙈 Faux positif exclu: {a} <> {b}")
+            self._folder_exclusions = getattr(self, '_folder_exclusions', set())
+            self._folder_exclusions.add((a, b))
+            name_item.setData(Qt.ItemDataRole.UserRole, None)
+            self.rename_table.item(row, 3).setText('')
+            self.rename_table.item(row, 4).setText('✅ OK')
+            for col in range(5):
+                it = self.rename_table.item(row, col)
+                it.setBackground(QColor(0, 0, 0, 0))
+                it.setForeground(COLOR_OK_FG)
+            count += 1
+        self._filling = False
+        if count:
+            log(f"Folder duplicate exclusions added: {count} -> {EXCLUSION_FILE}")
+            self.statusBar().showMessage(f"🙈 {count} paire(s) exclue(s) → FolderDoublonExclusion.txt")
+        else:
+            log("🙈 Exclure: aucune ligne '🔎 Doublon ?' dans la sélection - sélectionne la ligne flaggée avant de cliquer")
+            self.statusBar().showMessage("🙈 Sélectionne une ligne 🔎 Doublon ? d'abord")
 
-    def create_new_folder(self):
-        """Create new folder physically and apply it"""
-        folder_name = self.new_folder_var.get().strip()
-        
-        if not folder_name:
-            messagebox.showwarning("Warning", "Enter a folder name")
+    def apply_renames(self):
+        base = self.base_path
+        renamed = errors = 0
+        self._filling = True
+        for row in range(self.rename_table.rowCount()):
+            year = self.rename_table.item(row, 0).text()
+            current = self.rename_table.item(row, 1).text()
+            proposed = self.rename_table.item(row, 3).text().strip()
+            if not proposed or (proposed == current and self.rename_table.item(row, 4).text().startswith('✅')):
+                continue
+            old_path = os.path.join(base, year, current)
+            # Destination year = leading year of the proposed name (folder moves if different)
+            ym = re.match(r'^(20\d{2})', proposed)
+            dest_year = ym.group(1) if ym else year
+            new_path = os.path.join(base, dest_year, proposed)
+            if not os.path.isdir(old_path) or old_path == new_path:
+                continue
+            if os.path.normcase(old_path) == os.path.normcase(new_path):
+                # Same folder, only the case changes -> direct rename, NO merge
+                try:
+                    os.rename(old_path, new_path)
+                    log(f"Renamed (case): {year}/{current} -> {proposed}")
+                    self.rename_table.item(row, 1).setText(proposed)
+                    self.rename_table.item(row, 3).setText('')
+                    self.rename_table.item(row, 4).setText('✅ Renommé')
+                    for col in range(5):
+                        self.rename_table.item(row, col).setBackground(COLOR_DONE)
+                    renamed += 1
+                except Exception as e:
+                    self.rename_table.item(row, 4).setText('❌ Erreur')
+                    log(f"❌ Rename error {year}/{current}: {e}")
+                    errors += 1
+                continue
+            if os.path.exists(new_path):
+                # Target already exists (e.g. pCloud sync recreated the old folder) -> merge
+                m, du, e = merge_folders(old_path, new_path, os.path.join(base, '!duplicate'))
+                log(f"🔀 Merged: {year}/{current} -> {proposed} "
+                    f"({m} déplacé(s), {du} doublon(s) -> !duplicate, {e} erreur(s))")
+                if not os.path.exists(old_path):
+                    self.rename_table.item(row, 1).setText(proposed)
+                    self.rename_table.item(row, 3).setText('')
+                    self.rename_table.item(row, 4).setText('🔀 Fusionné')
+                    for col in range(5):
+                        self.rename_table.item(row, col).setBackground(COLOR_DONE)
+                    renamed += 1
+                else:
+                    self.rename_table.item(row, 4).setText('⚠️ Fusion partielle')
+                    errors += 1
+                continue
+            try:
+                os.makedirs(os.path.dirname(new_path), exist_ok=True)
+                os.rename(old_path, new_path)
+                log(f"Renamed: {year}/{current} -> {dest_year}/{proposed}")
+                self.rename_table.item(row, 1).setText(proposed)
+                self.rename_table.item(row, 3).setText('')
+                self.rename_table.item(row, 4).setText('✅ Renommé')
+                for col in range(5):
+                    self.rename_table.item(row, col).setBackground(COLOR_DONE)
+                renamed += 1
+            except Exception as e:
+                self.rename_table.item(row, 4).setText('❌ Erreur')
+                log(f"❌ Rename error {year}/{current}: {e}")
+                errors += 1
+        self._filling = False
+        self.statusBar().showMessage(f"✏️ {renamed} dossier(s) renommé(s)" + (f", {errors} erreur(s)" if errors else ""))
+
+    # ----- Tab 2: duplicates -----
+
+    def build_dup_tab(self):
+        w = QWidget()
+        layout = QVBoxLayout(w)
+
+        info = QLabel("Sélectionne une ou plusieurs lignes (Ctrl / Maj), puis choisis quel côté part à la corbeille "
+                      "avec les boutons sous les aperçus (raccourci <b>Suppr</b> = Copie 2). "
+                      "Sous les aperçus, ce qui <span style=\"" + DIFF_STYLE + "\">diffère</span> entre les deux "
+                      "chemins est surligné. La colonne <b>Score</b> se remplit toute seule en tâche de fond "
+                      "(taille + contenu affiché + durée pour les vidéos). Les vidéos défilent en diaporama "
+                      "(10/30/50/70/90 % de la durée) et un <b>double-clic</b> sur un aperçu ouvre le fichier. "
+                      "Les lignes traitées disparaissent et la sélection avance toute seule ; "
+                      "« Scanner » reconstruit tout depuis le disque.")
+        info.setTextFormat(Qt.TextFormat.RichText)
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        btns = QHBoxLayout()
+        b_scan = QPushButton("🔍 Scanner")
+        b_scan.clicked.connect(self.scan_duplicates)
+        btns.addWidget(b_scan)
+        b_go = QPushButton("🗑️ Tout traiter (Auto/Suffixe → Copie 2)")
+        b_go.setToolTip("Envoie à la corbeille la Copie 2 de toutes les lignes 🔄 Auto et 🔄 Suffixe.\n"
+                        "Les ⚠️ Conflits ne sont jamais traités automatiquement.")
+        b_go.clicked.connect(self.process_auto)
+        btns.addWidget(b_go)
+        b_cmp = QPushButton("🔬 Recomparer")
+        b_cmp.setToolTip("Relance la comparaison (taille + contenu + durée) sur les lignes\n"
+                         "sélectionnées, ou sur tout le tableau si rien n'est sélectionné.\n"
+                         "Elle démarre déjà toute seule après chaque scan.")
+        b_cmp.clicked.connect(self.compare_selection)
+        btns.addWidget(b_cmp)
+        b_ignore = QPushButton("🙈 Ignorer sélection")
+        b_ignore.clicked.connect(self.ignore_duplicates)
+        btns.addWidget(b_ignore)
+        self.dup_summary = QLabel("")
+        btns.addWidget(self.dup_summary)
+        btns.addStretch(1)
+        layout.addLayout(btns)
+
+        self.dup_table = QTableWidget(0, 5)
+        self.dup_table.setHorizontalHeaderLabels(["Fichier", "Type", "Score", "Copie 1", "Copie 2"])
+        self.dup_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.dup_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.dup_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.dup_table.verticalHeader().setVisible(False)
+        setup_header(self.dup_table, [340, 110, 90, 380, 380])
+        self.dup_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.dup_table.customContextMenuRequested.connect(self.dup_context_menu)
+        QShortcut(QKeySequence(Qt.Key.Key_Delete), self.dup_table,
+                  activated=lambda: self.trash_side(1),
+                  context=Qt.ShortcutContext.WidgetShortcut)
+        layout.addWidget(self.dup_table, stretch=1)
+
+        # Side-by-side comparison of both copies with unit actions
+        prev = QWidget()
+        ph = QHBoxLayout(prev)
+        ph.setContentsMargins(0, 4, 0, 0)
+        self.dup_thumb_labels = []
+        self.dup_caption_labels = []
+        self.dup_trash_buttons = []
+        for side, title in enumerate(("📁 Copie 1 (gardée par défaut)", "📁 Copie 2 (doublon présumé)")):
+            box = QVBoxLayout()
+            t = QLabel(title)
+            t.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            t.setStyleSheet("font-weight: bold;")
+            box.addWidget(t)
+            img = ClickableLabel("—")
+            img.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            img.setFixedHeight(220)
+            img.setStyleSheet("background-color: #1a1a1c;")
+            img.setToolTip("Double-clic : ouvrir le fichier")
+            img.setCursor(Qt.CursorShape.PointingHandCursor)
+            img.doubleClicked.connect(lambda s=side: self.open_file_side(s))
+            box.addWidget(img)
+            cap = QLabel("—")
+            cap.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cap.setTextFormat(Qt.TextFormat.RichText)
+            cap.setWordWrap(True)
+            cap.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            box.addWidget(cap)
+            act = QHBoxLayout()
+            b_trash = QPushButton(f"🗑️ Mise à la corbeille (Copie {side + 1})")
+            b_trash.setToolTip(f"Envoie à la corbeille la Copie {side + 1} de TOUTES les lignes sélectionnées.")
+            b_trash.clicked.connect(lambda checked, s=side: self.trash_side(s))
+            act.addWidget(b_trash)
+            b_open = QPushButton("📂 Ouvrir le dossier")
+            b_open.clicked.connect(lambda checked, s=side: self.open_side(s))
+            act.addWidget(b_open)
+            box.addLayout(act)
+            ph.addLayout(box)
+            self.dup_thumb_labels.append(img)
+            self.dup_caption_labels.append(cap)
+            self.dup_trash_buttons.append(b_trash)
+        layout.addWidget(prev)
+
+        self.dup_verdict = QLabel("—")
+        self.dup_verdict.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.dup_verdict.setTextFormat(Qt.TextFormat.RichText)
+        self.dup_verdict.setStyleSheet("padding: 4px;")
+        layout.addWidget(self.dup_verdict)
+
+        self.dup_table.itemSelectionChanged.connect(self.update_dup_preview)
+        return w
+
+    def selected_dup_rows(self):
+        return sorted({idx.row() for idx in self.dup_table.selectedIndexes()})
+
+    def select_dup_row(self, row):
+        """Select the given row (clamped to the table) and refresh the preview.
+        Used to auto-advance after a deletion so you can chain without clicking."""
+        count = self.dup_table.rowCount()
+        self.dup_table.clearSelection()
+        if count == 0:
+            self.current_dup_row = None
+            self.update_dup_preview()
             return
-        
-        # Check selected files
-        tree_selection = self.tree.selection()
-        if not tree_selection:
-            messagebox.showinfo("Info", "Select files to organize first")
-            self.tree.focus_set()
-            return
-        
-        # Get year from first selected file
-        first_item = tree_selection[0]
-        values = self.tree.item(first_item, 'values')
-        year = values[1]
-        
-        if not year:
-            messagebox.showerror("Error", "Cannot determine year")
-            return
-        
-        # Create folder physically
-        base = self.base_path.get()
-        year_folder = os.path.join(base, year)
-        new_folder_path = os.path.join(year_folder, folder_name)
-        
+        row = max(0, min(row, count - 1))
+        self.dup_table.blockSignals(True)   # avoid building the preview twice
         try:
-            # Create year folder if needed
-            os.makedirs(year_folder, exist_ok=True)
-            
-            # Create new folder
-            if not os.path.exists(new_folder_path):
-                os.makedirs(new_folder_path)
-                self.status_var.set(f"✨ Folder created: {folder_name}")
+            self.dup_table.selectRow(row)
+        finally:
+            self.dup_table.blockSignals(False)
+        self.dup_table.scrollToItem(self.dup_table.item(row, 0),
+                                    QAbstractItemView.ScrollHint.EnsureVisible)
+        self.dup_table.setFocus()
+        self.current_dup_row = row
+        self.update_dup_preview()
+
+    def refresh_dup_summary(self):
+        """Recount from the table itself so the summary stays true after removals"""
+        auto = suffix = conflict = 0
+        for row in range(self.dup_table.rowCount()):
+            kind = self.dup_table.item(row, 1).text()
+            if kind.startswith('🔄 Suffixe'):
+                suffix += 1
+            elif kind.startswith('🔄'):
+                auto += 1
             else:
-                self.status_var.set(f"📁 Folder already exists: {folder_name}")
-            
-            # Assign color to new folder
-            if folder_name not in self.folder_colors:
-                self.folder_colors[folder_name] = self.generate_color_from_name(folder_name)
-            
-            # Apply to selected files
-            count = 0
-            for item_id in tree_selection:
-                values = list(self.tree.item(item_id, 'values'))
-                filename = values[0]
-                
-                # Apply folder name
-                values[2] = folder_name
-                
-                # Update file_data
-                if filename in self.file_data:
-                    self.file_data[filename]['folder_name'] = folder_name
-                    
-                    # Recalculate final path
-                    self.update_path_final(filename, values)
-                    
-                    # Apply color
-                    self.apply_folder_color(item_id, folder_name)
-                    
-                    # Update display
-                    self.tree.item(item_id, values=values)
-                    count += 1
-            
-            # Save edits
-            self.save_edits()
-            
-            # Refresh listbox for this year
-            self.refresh_folders_listbox(year)
-            
-            # Clear field
-            self.new_folder_var.set('')
-            
-            self.status_var.set(f"✨ Created and applied to {count} file(s): {folder_name}")
-            
-            # Set focus back on TreeView
-            self.tree.focus_set()
-            
-        except Exception as e:
-            messagebox.showerror("Error", f"Cannot create folder: {e}")
+                conflict += 1
+        self.dup_summary.setText(f"🔄 {auto} déplaçable(s)   |   🔄 {suffix} copie(s) _N   "
+                                 f"|   ⚠️ {conflict} conflit(s)")
+        return auto, suffix, conflict
 
-    def generate_color_from_name(self, name):
-        """Generate pastel color from name"""
-        if not name:
-            return None
-        
-        # Hash name to generate stable color
-        hash_value = hash(name)
-        
-        # Generate pastel colors (fixed saturation and lightness)
-        import random
-        random.seed(hash_value)
-        
-        # HSL: Variable Hue, Saturation 40%, Lightness 90%
-        hue = random.randint(0, 360)
-        
-        # Convert HSL to RGB
-        def hsl_to_rgb(h, s, l):
-            c = (1 - abs(2 * l - 1)) * s
-            x = c * (1 - abs((h / 60) % 2 - 1))
-            m = l - c / 2
-            
-            if h < 60:
-                r, g, b = c, x, 0
-            elif h < 120:
-                r, g, b = x, c, 0
-            elif h < 180:
-                r, g, b = 0, c, x
-            elif h < 240:
-                r, g, b = 0, x, c
-            elif h < 300:
-                r, g, b = x, 0, c
+    def update_dup_preview(self):
+        """Show thumbnails of both copies of the selected duplicate"""
+        self.stop_slideshow()
+        self.trim_video_cache()
+        rows = self.selected_dup_rows()
+        self.current_dup_row = rows[0] if rows else None
+        # Buttons always name the side and show how many rows they will affect
+        for side, btn in enumerate(self.dup_trash_buttons):
+            suffix = f" — {len(rows)} lignes" if len(rows) > 1 else ""
+            btn.setText(f"🗑️ Mise à la corbeille (Copie {side + 1}){suffix}")
+            btn.setEnabled(bool(rows))
+        if self.current_dup_row is None:
+            for i in (0, 1):
+                self.dup_thumb_labels[i].setPixmap(QPixmap())
+                self.dup_thumb_labels[i].setText("—")
+                self.dup_caption_labels[i].setText("—")
+            self.dup_verdict.setText("—")
+            return
+        row = self.current_dup_row
+
+        # --- captions: both paths compared side by side, differences highlighted ---
+        sides = []
+        for i in (0, 1):
+            paths = self.dup_table.item(row, 3 + i).data(Qt.ItemDataRole.UserRole) or []
+            path = paths[0] if paths else ''
+            rel = os.path.relpath(path, self.base_path) if path else ''
+            try:
+                size = os.path.getsize(path) if path and os.path.isfile(path) else None
+            except OSError:
+                size = None
+            sides.append({'paths': paths, 'path': path, 'rel': rel, 'size': size})
+
+        if sides[0]['rel'] and sides[1]['rel']:
+            html0, html1 = diff_path_html(sides[0]['rel'], sides[1]['rel'])
+        else:
+            html0 = f'<span style="{SAME_STYLE}">{_esc(sides[0]["rel"])}</span>'
+            html1 = f'<span style="{SAME_STYLE}">{_esc(sides[1]["rel"])}</span>'
+        htmls = [html0, html1]
+        sizes_differ = (sides[0]['size'] is not None and sides[1]['size'] is not None
+                        and sides[0]['size'] != sides[1]['size'])
+
+        for i in (0, 1):
+            cap_label = self.dup_caption_labels[i]
+            s = sides[i]
+            if not s['path']:
+                cap_label.setText("—")
+                continue
+            if s['size'] is None:
+                cap_label.setText(f"<span style=\"color:#ff6b6b;\">(fichier absent)</span> "
+                                  f"{htmls[i]}")
+                continue
+            size_style = "color:#ff9b3d; font-weight:bold;" if sizes_differ else SAME_STYLE
+            extra = (f'<span style="{DIFF_STYLE}">+{len(s["paths"]) - 1} autre(s)</span>'
+                     if len(s['paths']) > 1 else '')
+            cap_label.setText(
+                f'{htmls[i]}'
+                f'<span style="{size_style}">&nbsp;&nbsp;({s["size"] / 1024:,.0f} Ko)</span>'
+                f'&nbsp;&nbsp;{extra}')
+
+        # --- previews: still image, or a 5-frame slideshow for videos ---
+        self.stop_slideshow()
+        for i in (0, 1):
+            img_label = self.dup_thumb_labels[i]
+            path = sides[i]['path']
+            if not path or not os.path.isfile(path):
+                img_label.setPixmap(QPixmap())
+                img_label.setText("—")
+                continue
+            ext = os.path.splitext(path)[1].lower()
+            if ext in VIDEO_EXTS:
+                frames = self.video_frames(path)
+                self.slide_frames[i] = frames
+                if frames:
+                    self.show_frame(i, 0)
+                else:
+                    img_label.setPixmap(QPixmap())
+                    img_label.setText("(pas d'aperçu vidéo — ffmpeg introuvable)"
+                                      if not FFMPEG else "(pas d'aperçu vidéo)")
+                continue
+            pm = self.make_thumb(path)
+            if pm:
+                img_label.setText("")
+                img_label.setPixmap(pm.scaled(QSize(420, 210),
+                                              Qt.AspectRatioMode.KeepAspectRatio,
+                                              Qt.TransformationMode.SmoothTransformation))
             else:
-                r, g, b = c, 0, x
-            
-            return int((r + m) * 255), int((g + m) * 255), int((b + m) * 255)
-        
-        r, g, b = hsl_to_rgb(hue, 0.4, 0.9)
-        return f'#{r:02x}{g:02x}{b:02x}'
+                img_label.setPixmap(QPixmap())
+                img_label.setText("(pas d'aperçu)")
+        if any(self.slide_frames):
+            self.slide_index = 0
+            self.slide_timer.start(VIDEO_SLIDE_MS)
 
-    def apply_folder_color(self, item_id, folder_name):
-        """Apply color to row based on folder name"""
-        if not folder_name:
-            self.tree.item(item_id, tags=())
+        # --- verdict: do the two files actually hold the same picture? ---
+        self.update_verdict(sides[0]['path'], sides[1]['path'])
+
+    # ----- video slideshow -----
+
+    def stop_slideshow(self):
+        self.slide_timer.stop()
+        self.slide_frames = [[], []]
+        self.slide_index = 0
+
+    def show_frame(self, side, index):
+        frames = self.slide_frames[side]
+        if not frames:
             return
-        
-        # Get color for this folder (must already be assigned by listbox)
-        if folder_name not in self.folder_colors:
-            self.folder_colors[folder_name] = self.generate_color_from_name(folder_name)
-        
-        tag_name = f'folder_{folder_name}'
-        
-        # Configure tag with color (every time, no problem)
-        color = self.folder_colors[folder_name]
-        self.tree.tag_configure(tag_name, background=color)
-        
-        # Apply tag to row
-        self.tree.item(item_id, tags=(tag_name,))
+        pct, pm, _ = frames[index % len(frames)]
+        label = self.dup_thumb_labels[side]
+        label.setText("")
+        label.setPixmap(pm.scaled(QSize(420, 210),
+                                  Qt.AspectRatioMode.KeepAspectRatio,
+                                  Qt.TransformationMode.SmoothTransformation))
+        label.setToolTip(f"🎬 {pct}% de la vidéo — double-clic : ouvrir le fichier")
 
-    def save_edits(self):
-        """Save edits to cache file"""
-        try:
-            edits = {}
-            for filename, data in self.file_data.items():
-                if data.get('folder_name'):
-                    edits[filename] = data['folder_name']
-            
-            with open(self.edits_cache_file, 'w', encoding='utf-8') as f:
-                json.dump(edits, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            print(f"Error saving edits: {e}")
+    def advance_slideshow(self):
+        self.slide_index += 1
+        for side in (0, 1):
+            self.show_frame(side, self.slide_index)
 
-    def load_edits(self):
-        """Load saved edits"""
-        try:
-            if os.path.exists(self.edits_cache_file):
-                with open(self.edits_cache_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-        except Exception as e:
-            print(f"Error loading edits: {e}")
-        
-        return {}
+    def video_frames(self, path):
+        """Extract frames at VIDEO_SAMPLE_POINTS. Returns [(percent, QPixmap, jpg_path), ...].
+        Cached per file so re-selecting a row costs nothing."""
+        if path in self.video_frame_cache:
+            return self.video_frame_cache[path]
+        frames = []
+        if not FFMPEG:
+            self.video_frame_cache[path] = frames
+            return frames
+        temp_dir = os.path.join(self.base_path, '!temp')
+        self.statusBar().showMessage(f"🎬 Extraction des images de {os.path.basename(path)}…")
+        QApplication.processEvents()
+        # Shares the jpgs with the background comparison: whichever ran first wins
+        for pct, jpg in extract_video_jpgs(path, temp_dir):
+            pm = QPixmap(jpg)
+            self.dup_temp_files.append(jpg)
+            if not pm.isNull():
+                frames.append((pct, pm, jpg))
+        if not frames:
+            log(f"❌ Aucune image extraite: {os.path.basename(path)}")
+        self.video_frame_cache[path] = frames
+        return frames
 
-    def check_duplicates(self):
-        """Check for duplicate files across all folders"""
-        print(f"\n[DUPLICATES] ========== Starting duplicate check ==========")
-        
-        base = self.base_path.get()
-        if not os.path.exists(base):
-            print(f"[DUPLICATES] ERROR: Camera folder not found: {base}")
-            messagebox.showerror("Error", "Camera folder not found")
+    # ----- content comparison -----
+
+    def row_of_token(self, token):
+        for row in range(self.dup_table.rowCount()):
+            it = self.dup_table.item(row, 0)
+            if it and it.data(Qt.ItemDataRole.UserRole) == token:
+                return row
+        return None
+
+    def row_path_lists(self, row):
+        return (self.dup_table.item(row, 3).data(Qt.ItemDataRole.UserRole) or [],
+                self.dup_table.item(row, 4).data(Qt.ItemDataRole.UserRole) or [])
+
+    def row_paths(self, row):
+        p1, p2 = self.row_path_lists(row)
+        return (p1[0] if p1 else ''), (p2[0] if p2 else '')
+
+    def dup_context_menu(self, pos):
+        row = self.dup_table.rowAt(pos.y())
+        if row < 0:
             return
-        
-        self.status_var.set("🔍 Scanning for duplicates...")
-        self.root.update()
-        
-        # Build index: filename -> [list of full paths]
+        if row not in self.selected_dup_rows():
+            self.select_dup_row(row)
+        rows = self.selected_dup_rows()
+        single = len(rows) == 1
+        menu = QMenu(self)
+        for side in (0, 1):
+            act = menu.addAction(f"✏️ Renommer la Copie {side + 1}…")
+            act.setEnabled(single)
+            act.triggered.connect(lambda _=False, s=side: self.rename_side(s))
+        menu.addSeparator()
+        for side in (0, 1):
+            act = menu.addAction(f"📂 Ouvrir le dossier de la Copie {side + 1}")
+            act.setEnabled(single)
+            act.triggered.connect(lambda _=False, s=side: self.open_side(s))
+        for side in (0, 1):
+            act = menu.addAction(f"▶️ Ouvrir la Copie {side + 1}")
+            act.setEnabled(single)
+            act.triggered.connect(lambda _=False, s=side: self.open_file_side(s))
+        menu.addSeparator()
+        for side in (0, 1):
+            act = menu.addAction(f"🗑️ Corbeille — Copie {side + 1}"
+                                 + (f" ({len(rows)} lignes)" if not single else ""))
+            act.triggered.connect(lambda _=False, s=side: self.trash_side(s))
+        menu.addSeparator()
+        menu.addAction("🔬 Recomparer ces lignes").triggered.connect(self.compare_selection)
+        menu.addAction("🙈 Ignorer (mémorisé)").triggered.connect(self.ignore_duplicates)
+        menu.addAction(f"♻️ Oublier les {len(self.ignore_list)} ignoré(s)…"
+                       ).triggered.connect(self.forget_ignored)
+        menu.exec(self.dup_table.viewport().mapToGlobal(pos))
+
+    def rename_side(self, side):
+        """Rename one of the two files: the usual fix when a '_1' is in fact a
+        different shot that just got a lazy name."""
+        row = self.current_dup_row
+        if row is None or row >= self.dup_table.rowCount():
+            return
+        paths = self.dup_table.item(row, 3 + side).data(Qt.ItemDataRole.UserRole) or []
+        old = paths[0] if paths else ''
+        if not old or not os.path.isfile(old):
+            self.statusBar().showMessage("Fichier introuvable")
+            return
+        folder, current = os.path.split(old)
+        new_name, ok = QInputDialog.getText(
+            self, f"Renommer la Copie {side + 1}",
+            f"Dossier : {os.path.relpath(folder, self.base_path)}\n\nNouveau nom :",
+            text=current)
+        new_name = (new_name or '').strip()
+        if not ok or not new_name or new_name == current:
+            return
+        new_path = os.path.join(folder, new_name)
+        if os.path.exists(new_path):
+            QMessageBox.warning(self, "Renommer", f"« {new_name} » existe déjà dans ce dossier.")
+            return
+        try:
+            os.rename(old, new_path)
+        except Exception as e:
+            log(f"❌ Renommage {current}: {e}")
+            QMessageBox.warning(self, "Renommer", f"Échec du renommage :\n{e}")
+            return
+        log(f"✏️ Renommé: {os.path.relpath(old, self.base_path)} -> {new_name}")
+        rest = paths[1:]
+        self.dup_table.item(row, 3 + side).setData(Qt.ItemDataRole.UserRole, [new_path] + rest)
+        self.dup_table.item(row, 3 + side).setText(
+            "; ".join(os.path.relpath(p, self.base_path) for p in [new_path] + rest))
+        if side == 1:
+            self.dup_table.item(row, 0).setText(new_name)
+        # No longer a name collision -> out of the automatic batch
+        self.dup_table.item(row, 1).setText('✏️ Renommé')
+        for col in range(5):
+            self.dup_table.item(row, col).setBackground(COLOR_DONE)
+        self.update_dup_preview()
+        self.statusBar().showMessage(f"✏️ Renommé en « {new_name} »")
+
+    def start_background_compare(self, rows=None):
+        """Score the rows in a worker thread. Called right after a scan, so the
+        Score column fills itself while you already work on the first rows."""
+        self.stop_background_compare()
+        if rows is None:
+            rows = [r for r in range(self.dup_table.rowCount())
+                    if r not in self.scored_tokens_rows()]
+        jobs = []
+        for row in rows:
+            token = self.dup_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            pa, pb = self.row_paths(row)
+            if token is not None and pa and pb:
+                jobs.append((token, pa, pb))
+        if not jobs:
+            return
+        self.compare_total = len(jobs)
+        self.compare_done = 0
+        self.compare_worker = CompareWorker(jobs, os.path.join(self.base_path, '!temp'), self)
+        self.compare_worker.scored.connect(self.apply_score)
+        self.compare_worker.progressed.connect(self.on_compare_progress)
+        self.compare_worker.finished.connect(self.on_compare_finished)
+        self.compare_worker.start()
+        log(f"🔬 Comparaison en tâche de fond: {len(jobs)} ligne(s)")
+
+    def scored_tokens_rows(self):
+        """Rows already carrying a result"""
+        return {row for row in range(self.dup_table.rowCount())
+                if self.dup_table.item(row, 2).text() not in ('…', '')}
+
+    def stop_background_compare(self, blocking=False):
+        w = getattr(self, 'compare_worker', None)
+        if w and w.isRunning():
+            w.stop()
+            if blocking:
+                w.wait(3000)
+        self.compare_worker = None
+
+    def on_compare_progress(self, done, total):
+        self.compare_done = done
+        if done % 5 == 0 or done == total:
+            self.statusBar().showMessage(f"🔬 Comparaison en fond… {done}/{total}")
+
+    def on_compare_finished(self):
+        self.statusBar().showMessage(f"🔬 Comparaison terminée ({self.compare_done} ligne(s))")
+        log(f"🔬 Comparaison terminée: {self.compare_done} ligne(s)")
+
+    def apply_score(self, token, res):
+        """A background result landed: write it into the Score column"""
+        row = self.row_of_token(token)
+        if row is None:
+            return          # row was deleted meanwhile
+        self.compare_results[token] = res
+        emoji, short, long_label, color = verdict_for(res)
+        item = self.dup_table.item(row, 2)
+        item.setText(f"{emoji} {short}")
+        if isinstance(item, SortableItem):
+            item.sort_key = res.get('content') if res.get('content') is not None else -1.0
+        item.setForeground(QColor(color))
+        item.setToolTip(f"{long_label}\n{verdict_details(res)}")
+        score = res.get('content')
+        if score is not None and score < SIM_RELATED:
+            for col in range(5):
+                self.dup_table.item(row, col).setBackground(COLOR_CONFLICT)
+        if row == self.current_dup_row:
+            self.show_verdict(res)
+
+    def show_verdict(self, res):
+        emoji, _short, long_label, color = verdict_for(res)
+        details = verdict_details(res)
+        self.dup_verdict.setText(
+            f'<span style="color:{color}; font-weight:bold;">{emoji} {long_label}</span>'
+            f'<span style="{SAME_STYLE}">&nbsp;&nbsp;·&nbsp;&nbsp;{details}</span>')
+
+    def update_verdict(self, path_a, path_b):
+        """Verdict for the row on screen: reuse the background result if it already
+        arrived, otherwise compute this one pair right away."""
+        row = self.current_dup_row
+        token = (self.dup_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+                 if row is not None else None)
+        if token is not None and token in self.compare_results:
+            self.show_verdict(self.compare_results[token])
+            return
+        if not path_a or not path_b or not os.path.isfile(path_a) or not os.path.isfile(path_b):
+            self.dup_verdict.setText("—")
+            return
+        temp_dir = os.path.join(self.base_path, '!temp')
+        try:
+            identical = (os.path.getsize(path_a) == os.path.getsize(path_b)
+                         and filecmp.cmp(path_a, path_b, shallow=False))
+        except OSError:
+            identical = False
+        res = compare_fingerprints(fingerprint(path_a, temp_dir),
+                                   fingerprint(path_b, temp_dir), identical)
+        if token is not None:
+            self.compare_results[token] = res
+            self.apply_score(token, res)
+        else:
+            self.show_verdict(res)
+
+    def compare_selection(self):
+        """Re-run the comparison on the selected rows (or restart the whole pass
+        when nothing is selected)"""
+        rows = self.selected_dup_rows()
+        if not rows:
+            rows = list(range(self.dup_table.rowCount()))
+        for row in rows:
+            token = self.dup_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            self.compare_results.pop(token, None)
+            self.dup_table.item(row, 2).setText("…")
+        self.start_background_compare(rows)
+
+    def open_file_side(self, side):
+        """Double-click on a preview: open the file itself"""
+        row = self.current_dup_row
+        if row is None or row >= self.dup_table.rowCount():
+            return
+        paths = self.dup_table.item(row, 3 + side).data(Qt.ItemDataRole.UserRole) or []
+        if paths and os.path.isfile(paths[0]):
+            try:
+                os.startfile(paths[0])
+            except Exception as e:
+                log(f"❌ Ouverture {os.path.basename(paths[0])}: {e}")
+
+    def make_thumb(self, path):
+        """Still thumbnail for images (videos go through video_frames)"""
+        ext = os.path.splitext(path)[1].lower()
+        if ext in IMAGE_EXTS and PIL_AVAILABLE:
+            try:
+                img = Image.open(path)
+                img.thumbnail((420, 280))
+                pm = pil_to_pixmap(img)
+                img.close()
+                return pm
+            except Exception as e:
+                log(f"❌ Thumb error {os.path.basename(path)}: {e}")
+        return None
+
+    def trim_video_cache(self):
+        """Keep a few videos' frames around (going back and forth between rows is common),
+        but drop the temp jpgs once the cache grows."""
+        if len(self.video_frame_cache) <= VIDEO_CACHE_MAX:
+            return
+        self.cleanup_dup_temp()
+
+    def cleanup_dup_temp(self):
+        """Frames no longer displayed -> delete from !temp"""
+        self.slide_timer.stop()
+        self.slide_frames = [[], []]
+        self.video_frame_cache = {}
+        self.hash_cache = {}
+        for f in self.dup_temp_files:
+            try:
+                os.remove(f)
+            except Exception:
+                pass
+        self.dup_temp_files = []
+
+    def scan_duplicates(self):
+        base = self.base_path
+        if not os.path.isdir(base):
+            log(f"❌ Camera folder not found: {base}")
+            return
+        self.statusBar().showMessage("🔍 Scan des doublons…")
+        QApplication.processEvents()
+
+        # Full rebuild: wipe the table, the preview and the temp thumbnails
+        self.stop_background_compare()
+        self.compare_results = {}
+        self.cleanup_dup_temp()
+        self.dup_table.clearSelection()
+        self.dup_table.setSortingEnabled(False)   # re-enabled once the rows are in
+        self.dup_table.setRowCount(0)
+        self.current_dup_row = None
+        self.update_dup_preview()
+
         file_index = {}
         screenshot_folders = set()
         organized_folders = set()
-        
-        print(f"[DUPLICATES] Scanning year folders...")
-        
-        # Scan all year folders
-        years_found = 0
+        suffix_dupes = []  # (copy_filename, copy_path, original_path, same_size)
+
         for item in os.listdir(base):
             item_path = os.path.join(base, item)
-            if not os.path.isdir(item_path):
+            if not os.path.isdir(item_path) or not re.match(r'^\d{4}$', item):
                 continue
-            
-            # Check if it's a year folder
-            if re.match(r'^\d{4}$', item):
-                years_found += 1
-                year_path = item_path
-                print(f"[DUPLICATES] Processing year folder: {item}")
-                
-                # Scan all folders in this year
-                folders_in_year = 0
-                for folder in os.listdir(year_path):
-                    folder_path = os.path.join(year_path, folder)
-                    if not os.path.isdir(folder_path):
+            for folder in os.listdir(item_path):
+                folder_path = os.path.join(item_path, folder)
+                if not os.path.isdir(folder_path):
+                    continue
+                if folder.startswith('!Screenshot') or folder.startswith('!ScreenRecorder'):
+                    screenshot_folders.add(folder_path)
+                elif not folder.startswith('!'):
+                    organized_folders.add(folder_path)
+                local = {}
+                try:
+                    for filename in os.listdir(folder_path):
+                        filepath = os.path.join(folder_path, filename)
+                        if os.path.isfile(filepath):
+                            file_index.setdefault(filename, []).append(filepath)
+                            local[filename] = filepath
+                except Exception as e:
+                    log(f"❌ Error scanning {folder_path}: {e}")
+                # Same-folder copies: 'x_1.ext', 'x (1).ext', 'x - Copie.ext'... next to 'x.ext'
+                for filename, filepath in local.items():
+                    original = copy_original_name(filename)
+                    if not original or original not in local:
                         continue
-                    
-                    folders_in_year += 1
-                    
-                    # Track folder type
-                    if folder.startswith('!Screenshot') or folder.startswith('!ScreenRecorder'):
-                        screenshot_folders.add(folder_path)
-                        print(f"[DUPLICATES]   Screenshot folder: {folder}")
-                    elif not folder.startswith('!'):
-                        organized_folders.add(folder_path)
-                        print(f"[DUPLICATES]   Organized folder: {folder}")
-                    
-                    # Index all files in this folder
                     try:
-                        files_in_folder = 0
-                        for filename in os.listdir(folder_path):
-                            filepath = os.path.join(folder_path, filename)
-                            if os.path.isfile(filepath):
-                                if filename not in file_index:
-                                    file_index[filename] = []
-                                file_index[filename].append(filepath)
-                                files_in_folder += 1
-                        print(f"[DUPLICATES]     {files_in_folder} files indexed")
-                    except Exception as e:
-                        print(f"[DUPLICATES] Error scanning {folder_path}: {e}")
-                
-                print(f"[DUPLICATES]   Total folders in {item}: {folders_in_year}")
-        
-        print(f"[DUPLICATES] Years processed: {years_found}")
-        print(f"[DUPLICATES] Screenshot folders: {len(screenshot_folders)}")
-        print(f"[DUPLICATES] Organized folders: {len(organized_folders)}")
-        print(f"[DUPLICATES] Total unique filenames: {len(file_index)}")
-        
-        # Find duplicates
-        auto_delete_count = 0
-        conflicts = []  # List of (filename, [paths])
-        
-        duplicates_found = 0
-        for filename, paths in file_index.items():
+                        same_size = os.path.getsize(filepath) == os.path.getsize(local[original])
+                    except OSError:
+                        continue
+                    suffix_dupes.append((filename, filepath, local[original], same_size))
+
+        auto_count = conflict_count = 0
+        for filename, paths in sorted(file_index.items()):
             if len(paths) < 2:
                 continue
-            
-            duplicates_found += 1
-            print(f"[DUPLICATES] Duplicate: {filename} ({len(paths)} copies)")
-            
-            # Skip if in ignore list
-            if filename in self.duplicate_ignore_list:
-                print(f"[DUPLICATES]   → IGNORED (in ignore list)")
-                continue
-            
-            # Check if any path is in screenshot folder
             screenshot_paths = [p for p in paths if any(p.startswith(sf) for sf in screenshot_folders)]
             organized_paths = [p for p in paths if any(p.startswith(of) for of in organized_folders)]
-            
-            print(f"[DUPLICATES]   Screenshot copies: {len(screenshot_paths)}")
-            print(f"[DUPLICATES]   Organized copies: {len(organized_paths)}")
-            
+
             if screenshot_paths and organized_paths:
-                # AUTO DELETE: Screenshot + Organized → delete screenshot copy
-                print(f"[DUPLICATES]   → AUTO DELETE screenshot copies")
-                for screenshot_path in screenshot_paths:
+                if self.is_ignored(filename, [organized_paths[0]], screenshot_paths):
+                    continue
+                self.add_dup_row(filename, '🔄 Auto', [organized_paths[0]], screenshot_paths,
+                                 COLOR_AUTO)
+                auto_count += 1
+            elif len(organized_paths) >= 2:
+                if self.is_ignored(filename, [organized_paths[0]], organized_paths[1:]):
+                    continue
+                self.add_dup_row(filename, '⚠️ Conflit', [organized_paths[0]], organized_paths[1:],
+                                 COLOR_CONFLICT)
+                conflict_count += 1
+
+        suffix_count = copy_doubt_count = 0
+        for filename, filepath, orig_path, same_size in suffix_dupes:
+            if self.is_ignored(filename, [orig_path], [filepath]):
+                continue
+            if same_size:
+                # Copy marker + identical size: safe to batch-process
+                self.add_dup_row(filename, '🔄 Suffixe', [orig_path], [filepath], COLOR_AUTO)
+                suffix_count += 1
+            else:
+                # Looks like a copy but the sizes differ -> never touched automatically
+                self.add_dup_row(filename, '⚠️ Copie ?', [orig_path], [filepath], COLOR_CONFLICT)
+                copy_doubt_count += 1
+
+        self.dup_table.setSortingEnabled(True)
+        self.refresh_dup_summary()
+        self.statusBar().showMessage(
+            f"🔍 Doublons : {auto_count + suffix_count} déplaçables, "
+            f"{conflict_count + copy_doubt_count} à vérifier"
+            + (f"   |   🙈 {len(self.ignore_list)} ignoré(s)" if self.ignore_list else ""))
+        log(f"Duplicate scan: {auto_count} auto-movable, {suffix_count} suffix copies, "
+            f"{conflict_count} conflicts, {copy_doubt_count} copies with a different size")
+        # Score everything in the background: the column fills itself while you work
+        self.start_background_compare()
+
+    def add_dup_row(self, filename, kind, paths1, paths2, color):
+        base = self.base_path
+        row = self.dup_table.rowCount()
+        self.dup_table.insertRow(row)
+        texts = [filename, kind, "…",
+                 "; ".join(os.path.relpath(p, base) for p in paths1),
+                 "; ".join(os.path.relpath(p, base) for p in paths2)]
+        for col, text in enumerate(texts):
+            # Score sorts on its numeric value, not on its emoji
+            it = SortableItem(text, -1.0) if col == 2 else QTableWidgetItem(text)
+            it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            it.setBackground(color)
+            self.dup_table.setItem(row, col, it)
+        self.dup_table.item(row, 3).setData(Qt.ItemDataRole.UserRole, list(paths1))
+        self.dup_table.item(row, 4).setData(Qt.ItemDataRole.UserRole, list(paths2))
+        # Stable id: rows shift as they are deleted, background results arrive later
+        self.row_token += 1
+        self.dup_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, self.row_token)
+        self.dup_table.item(row, 2).setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+
+    def trash_paths(self, paths):
+        """Send files to recycle bin. Returns (trashed, errors)"""
+        n = errors = 0
+        for p in paths:
+            try:
+                from send2trash import send2trash
+                send2trash(os.path.normpath(p))
+                log(f"🗑️ Corbeille: {os.path.relpath(p, self.base_path)}")
+                n += 1
+            except Exception as e:
+                log(f"❌ Erreur corbeille {os.path.basename(p)}: {e}")
+                errors += 1
+        return n, errors
+
+    def trash_rows_side(self, rows, side):
+        """Send the given side (0 = Copie 1, 1 = Copie 2) of each row to the recycle bin.
+        Rows fully processed are removed from the table."""
+        trashed = errors = skipped = 0
+        todo = sorted(rows, reverse=True)
+        # Block selection signals: removeRow() would otherwise rebuild the preview
+        # (and regenerate video thumbnails) once per deleted row.
+        self.dup_table.blockSignals(True)
+        try:
+            for i, row in enumerate(todo):
+                paths = self.dup_table.item(row, 3 + side).data(Qt.ItemDataRole.UserRole) or []
+                existing = [p for p in paths if os.path.isfile(p)]
+                if not existing:
+                    # Nothing left on disk: the row is stale, drop it
+                    self.dup_table.removeRow(row)
+                    skipped += 1
+                    continue
+                t, e = self.trash_paths(existing)
+                trashed += t
+                errors += e
+                if e == 0:
+                    self.dup_table.removeRow(row)
+                if len(todo) > 20 and i % 20 == 0:
+                    self.statusBar().showMessage(f"🗑️ Corbeille… {i + 1}/{len(todo)}")
+                    QApplication.processEvents()
+        finally:
+            self.dup_table.blockSignals(False)
+        self.refresh_dup_summary()
+        # Jump straight to the next row so you can chain deletions without re-clicking
+        self.select_dup_row(min(todo) if todo else 0)
+        msg = f"🗑️ {trashed} fichier(s) à la corbeille (Copie {side + 1})"
+        if skipped:
+            msg += f", {skipped} ligne(s) obsolète(s) retirée(s)"
+        if errors:
+            msg += f", {errors} erreur(s)"
+        log(f"Traitement doublons: {msg}")
+        self.statusBar().showMessage(msg)
+        return trashed, errors
+
+    def process_auto(self):
+        """Batch: every 🔄 Auto / 🔄 Suffixe row -> Copie 2 to recycle bin"""
+        # A row the comparison flagged as visually different is never batch-deleted,
+        # even if its name says "copy".
+        rows = [r for r in range(self.dup_table.rowCount())
+                if self.dup_table.item(r, 1).text().startswith('🔄')
+                and '🔴' not in self.dup_table.item(r, 2).text()
+                and '🟠' not in self.dup_table.item(r, 2).text()]
+        skipped = sum(1 for r in range(self.dup_table.rowCount())
+                      if self.dup_table.item(r, 1).text().startswith('🔄')) - len(rows)
+        if not rows:
+            self.statusBar().showMessage("Aucune ligne 🔄 Auto/Suffixe à traiter")
+            return
+        n_files = sum(len(self.dup_table.item(r, 4).data(Qt.ItemDataRole.UserRole) or [])
+                      for r in rows)
+        if QMessageBox.question(
+                self, "Confirmer",
+                f"Envoyer à la corbeille la Copie 2 de {len(rows)} ligne(s) 🔄 Auto/Suffixe "
+                f"({n_files} fichier(s)) ?\n\nLes ⚠️ Conflits ne sont pas touchés."
+                + (f"\n{skipped} ligne(s) écartée(s) : le contenu ne correspond pas (🟠/🔴)."
+                   if skipped else ""),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        self.trash_rows_side(rows, 1)
+
+    def trash_side(self, side):
+        """Send the chosen side of every selected row to the recycle bin"""
+        rows = self.selected_dup_rows()
+        if not rows:
+            self.statusBar().showMessage("Sélectionne au moins une ligne d'abord")
+            return
+        if len(rows) > 1:
+            n_files = sum(len(self.dup_table.item(r, 3 + side).data(Qt.ItemDataRole.UserRole) or [])
+                          for r in rows)
+            if QMessageBox.question(
+                    self, "Confirmer",
+                    f"Envoyer à la corbeille la Copie {side + 1} de {len(rows)} ligne(s) "
+                    f"({n_files} fichier(s)) ?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                return
+        self.trash_rows_side(rows, side)
+
+    def open_side(self, side):
+        """Unit action: open the folder of the displayed copy"""
+        row = self.current_dup_row
+        if row is None or row >= self.dup_table.rowCount():
+            return
+        paths = self.dup_table.item(row, 3 + side).data(Qt.ItemDataRole.UserRole) or []
+        if paths:
+            folder = os.path.dirname(paths[0])
+            if os.path.isdir(folder):
+                os.startfile(folder)
+
+    def pair_key(self, paths1, paths2):
+        """Identity of a duplicate pair, stable across scans and persisted to disk"""
+        base = self.base_path
+        a = os.path.relpath(paths1[0], base) if paths1 else ''
+        b = os.path.relpath(paths2[0], base) if paths2 else ''
+        return f"{a} || {b}"
+
+    def is_ignored(self, filename, paths1, paths2):
+        """Ignored pairs are remembered between sessions. Bare filenames are still
+        honoured so the lists saved by earlier versions keep working."""
+        return (filename in self.ignore_list
+                or self.pair_key(paths1, paths2) in self.ignore_list)
+
+    def forget_ignored(self):
+        n = len(self.ignore_list)
+        if not n:
+            self.statusBar().showMessage("Aucun doublon ignoré")
+            return
+        if QMessageBox.question(
+                self, "Doublons ignorés",
+                f"Oublier les {n} doublon(s) ignoré(s) ?\nIls réapparaîtront au prochain scan.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        self.ignore_list = set()
+        save_json(IGNORE_FILE, [])
+        log(f"♻️ Liste des doublons ignorés vidée ({n} entrée(s))")
+        self.statusBar().showMessage(f"♻️ {n} doublon(s) ignoré(s) oublié(s) — relance le scan")
+
+    def ignore_duplicates(self):
+        rows = sorted(self.selected_dup_rows(), reverse=True)
+        count = 0
+        self.dup_table.blockSignals(True)
+        try:
+            for row in rows:
+                filename = self.dup_table.item(row, 0).text()
+                paths1, paths2 = self.row_path_lists(row)
+                key = self.pair_key(paths1, paths2)
+                self.ignore_list.add(key)
+                log(f"🙈 Doublon ignoré: {key}")
+                self.dup_table.removeRow(row)
+                count += 1
+        finally:
+            self.dup_table.blockSignals(False)
+        self.refresh_dup_summary()
+        self.select_dup_row(min(rows) if rows else 0)
+        if count:
+            save_json(IGNORE_FILE, sorted(self.ignore_list))
+            self.statusBar().showMessage(f"🙈 {count} fichier(s) ignoré(s)")
+
+    # ----- Tab 3: sort media -----
+
+    def build_sort_tab(self):
+        w = QWidget()
+        layout = QVBoxLayout(w)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        layout.addWidget(splitter, stretch=1)
+
+        # Left: file table
+        left = QWidget()
+        lv = QVBoxLayout(left)
+        lv.setContentsMargins(0, 0, 0, 0)
+        lv.addWidget(QLabel("📋 Fichiers à trier (double-clic sur l'année pour corriger)"))
+        self.file_table = QTableWidget(0, 4)
+        self.file_table.setHorizontalHeaderLabels(
+            ["Fichier", "Date et heure", "Année", "Dossier"])
+        self.file_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.file_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.file_table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
+        self.file_table.verticalHeader().setVisible(False)
+        setup_header(self.file_table, [380, 150, 60, 260])
+        self.file_table.itemSelectionChanged.connect(self.on_file_selection)
+        self.file_table.itemChanged.connect(self.on_file_item_changed)
+        QShortcut(QKeySequence(Qt.Key.Key_Delete), self.file_table,
+                  activated=self.delete_selected, context=Qt.ShortcutContext.WidgetShortcut)
+        lv.addWidget(self.file_table)
+        splitter.addWidget(left)
+
+        # Middle: folders
+        mid = QWidget()
+        mv = QVBoxLayout(mid)
+        mv.setContentsMargins(0, 0, 0, 0)
+        self.folders_label = QLabel("📁 Dossiers")
+        mv.addWidget(self.folders_label)
+        self.folder_list = QListWidget()
+        self.folder_list.itemClicked.connect(self.on_folder_clicked)
+        self.folder_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.folder_list.customContextMenuRequested.connect(self.folder_context_menu)
+        self.folder_list.setToolTip("Clic : assigner la sélection   |   Clic droit : renommer / ouvrir")
+        mv.addWidget(self.folder_list, stretch=1)
+        mv.addWidget(QLabel("✨ Nouveau dossier :"))
+        self.new_folder_edit = QLineEdit()
+        self.new_folder_edit.returnPressed.connect(self.create_new_folder)
+        mv.addWidget(self.new_folder_edit)
+        b_create = QPushButton("Créer et assigner")
+        b_create.clicked.connect(self.create_new_folder)
+        mv.addWidget(b_create)
+        splitter.addWidget(mid)
+
+        # Right: viewer
+        right = QWidget()
+        rv = QVBoxLayout(right)
+        rv.setContentsMargins(0, 0, 0, 0)
+        rv.addWidget(QLabel("🖼️ Aperçu (Ctrl+molette = zoom)"))
+        self.viewer_scroll = QScrollArea()
+        self.viewer_scroll.setWidgetResizable(True)
+        self.viewer_label = QLabel("")
+        self.viewer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.viewer_label.setStyleSheet("background-color: #1a1a1c; color: #cccccc;")
+        self.viewer_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        self.viewer_scroll.setWidget(self.viewer_label)
+        self.viewer_scroll.viewport().installEventFilter(self)
+        rv.addWidget(self.viewer_scroll, stretch=1)
+
+        # Video controls: one radio per sampling point, named rather than numbered
+        self.video_bar = QWidget()
+        vb = QHBoxLayout(self.video_bar)
+        vb.setContentsMargins(0, 6, 0, 0)
+        vb.setSpacing(10)
+        vb.addWidget(QLabel("🎬 Position :"))
+        self.video_buttons = []
+        self.video_group = QButtonGroup(self)
+        self.video_group.setExclusive(True)
+        for i, pct in enumerate(VIDEO_PERCENTS):
+            label = "Début" if pct == 0 else "Fin" if pct >= 100 else f"{pct} %"
+            b = QRadioButton(label)
+            b.setToolTip(f"Image à {pct} % de la durée")
+            b.toggled.connect(lambda checked, idx=i: checked and self.show_video_percent(idx))
+            self.video_group.addButton(b, i)
+            vb.addWidget(b)
+            self.video_buttons.append(b)
+        vb.addStretch(1)
+        b_play = QPushButton("▶️ Lire la vidéo")
+        b_play.clicked.connect(self.play_current_video)
+        vb.addWidget(b_play)
+        self.video_bar.setVisible(False)
+        rv.addWidget(self.video_bar)
+
+        self.file_label = QLabel("")
+        self.file_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        rv.addWidget(self.file_label)
+        splitter.addWidget(right)
+
+        splitter.setSizes([560, 260, 640])
+
+        # Action buttons
+        actions = QHBoxLayout()
+        b_auto = QPushButton("⚡ Ranger Screens/Recorder/Pictures")
+        b_auto.clicked.connect(self.run_auto_organize)
+        actions.addWidget(b_auto)
+        b_apply = QPushButton("✅ APPLIQUER les déplacements")
+        b_apply.clicked.connect(self.apply_moves)
+        actions.addWidget(b_apply)
+        b_delete = QPushButton("🗑️ Supprimer (corbeille)")
+        b_delete.clicked.connect(self.delete_selected)
+        actions.addWidget(b_delete)
+        b_reset = QPushButton("❌ Recharger")
+        b_reset.clicked.connect(self.scan_media)
+        actions.addWidget(b_reset)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+        return w
+
+    # ----- Tab 4: viewer -----
+
+    def build_viewer_tab(self):
+        w = QWidget()
+        layout = QVBoxLayout(w)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        layout.addWidget(splitter, stretch=1)
+
+        # Column 1: years
+        left = QWidget()
+        lv = QVBoxLayout(left)
+        lv.setContentsMargins(0, 0, 0, 0)
+        lv.addWidget(QLabel("📅 Années"))
+        self.viewer_years = QListWidget()
+        self.viewer_years.currentItemChanged.connect(self.on_viewer_year)
+        lv.addWidget(self.viewer_years, stretch=1)
+        b_refresh = QPushButton("🔄 Rafraîchir")
+        b_refresh.clicked.connect(self.refresh_viewer_years)
+        lv.addWidget(b_refresh)
+        splitter.addWidget(left)
+
+        # Column 2: folders of that year
+        mid = QWidget()
+        mv = QVBoxLayout(mid)
+        mv.setContentsMargins(0, 0, 0, 0)
+        self.viewer_folders_label = QLabel("📁 Dossiers")
+        mv.addWidget(self.viewer_folders_label)
+        self.viewer_folders = QListWidget()
+        self.viewer_folders.currentItemChanged.connect(self.on_viewer_folder)
+        self.viewer_folders.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.viewer_folders.customContextMenuRequested.connect(self.viewer_folder_menu)
+        mv.addWidget(self.viewer_folders, stretch=1)
+        splitter.addWidget(mid)
+
+        # Column 3: thumbnails
+        right = QWidget()
+        rv = QVBoxLayout(right)
+        rv.setContentsMargins(0, 0, 0, 0)
+        self.viewer_count = QLabel("🖼️ Sélectionne un dossier")
+        rv.addWidget(self.viewer_count)
+        self.viewer_grid = QListWidget()
+        self.viewer_grid.setViewMode(QListWidget.ViewMode.IconMode)
+        self.viewer_grid.setIconSize(QSize(THUMB_W, THUMB_H))
+        self.viewer_grid.setGridSize(QSize(THUMB_W + 18, THUMB_H + 42))
+        self.viewer_grid.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.viewer_grid.setMovement(QListWidget.Movement.Static)
+        self.viewer_grid.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.viewer_grid.setWordWrap(True)
+        self.viewer_grid.setUniformItemSizes(True)
+        self.viewer_grid.setSpacing(2)
+        self.viewer_grid.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.viewer_grid.customContextMenuRequested.connect(self.viewer_grid_menu)
+        self.viewer_grid.itemSelectionChanged.connect(self.on_viewer_selection)
+        self.viewer_grid.itemDoubleClicked.connect(lambda _it: self.viewer_open())
+        QShortcut(QKeySequence(Qt.Key.Key_Delete), self.viewer_grid,
+                  activated=self.viewer_delete, context=Qt.ShortcutContext.WidgetShortcut)
+        QShortcut(QKeySequence(Qt.Key.Key_F2), self.viewer_grid,
+                  activated=self.viewer_rename, context=Qt.ShortcutContext.WidgetShortcut)
+        rv.addWidget(self.viewer_grid, stretch=1)
+        splitter.addWidget(right)
+        splitter.setSizes([150, 280, 900])
+
+        # Bottom: chronological timeline
+        self.viewer_timeline = Timeline()
+        self.viewer_timeline.picked.connect(self.on_timeline_picked)
+        layout.addWidget(self.viewer_timeline)
+
+        actions = QHBoxLayout()
+        for label, slot in (("✏️ Renommer (F2)", self.viewer_rename),
+                            ("▶️ Ouvrir", self.viewer_open),
+                            ("📂 Ouvrir le dossier", self.viewer_open_folder),
+                            ("🗑️ Supprimer (Suppr)", self.viewer_delete)):
+            b = QPushButton(label)
+            b.clicked.connect(slot)
+            actions.addWidget(b)
+        actions.addStretch(1)
+        self.year_view_check = QCheckBox("📅 Vue année entière (01/01 → 31/12)")
+        self.year_view_check.setToolTip(
+            "Étale la frise sur l'année complète : on voit tout de suite si les photos\n"
+            "sont concentrées en début ou en fin d'année.")
+        self.year_view_check.toggled.connect(self.on_year_view_toggled)
+        actions.addWidget(self.year_view_check)
+        layout.addLayout(actions)
+
+        self.viewer_media = []          # [(path, datetime), ...] in display order
+        return w
+
+    def on_tab_changed(self, index):
+        if self.tabs.tabText(index).startswith("4") and self.viewer_years.count() == 0:
+            self.refresh_viewer_years()
+
+    def refresh_viewer_years(self):
+        self.viewer_years.clear()
+        self.viewer_folders.clear()
+        self.viewer_grid.clear()
+        self.viewer_timeline.set_points([])
+        base = self.base_path
+        if not os.path.isdir(base):
+            return
+        years = sorted((d for d in os.listdir(base)
+                        if os.path.isdir(os.path.join(base, d)) and re.match(r'^\d{4}$', d)),
+                       reverse=True)
+        for y in years:
+            self.viewer_years.addItem(QListWidgetItem(y))
+        if years:
+            self.viewer_years.setCurrentRow(0)
+
+    def on_viewer_year(self, current, _previous=None):
+        self.viewer_folders.clear()
+        self.viewer_grid.clear()
+        self.viewer_timeline.set_points([])
+        if current is None:
+            return
+        year = current.text()
+        self.viewer_folders_label.setText(f"📁 Dossiers {year}")
+        year_dir = os.path.join(self.base_path, year)
+        if not os.path.isdir(year_dir):
+            return
+        for folder in sorted(os.listdir(year_dir)):
+            if not os.path.isdir(os.path.join(year_dir, folder)) or folder.startswith('!'):
+                continue
+            it = QListWidgetItem(folder)
+            it.setBackground(folder_color(folder))
+            self.viewer_folders.addItem(it)
+
+    def viewer_current_folder(self):
+        year_it = self.viewer_years.currentItem()
+        folder_it = self.viewer_folders.currentItem()
+        if not year_it or not folder_it:
+            return None
+        return os.path.join(self.base_path, year_it.text(), folder_it.text())
+
+    def on_viewer_folder(self, current, _previous=None):
+        self.viewer_grid.clear()
+        self.viewer_media = []
+        self.thumb_rows = {}
+        self.viewer_timeline.set_points([])
+        folder = self.viewer_current_folder()
+        if not folder or not os.path.isdir(folder):
+            return
+        names = sorted((f for f in os.listdir(folder)
+                        if os.path.splitext(f)[1].lower() in (IMAGE_EXTS | VIDEO_EXTS)
+                        and os.path.isfile(os.path.join(folder, f))),
+                       key=str.lower)                      # alphabetical, as asked
+        placeholder = QIcon(self.empty_thumb())
+        cell = QSize(THUMB_W + 14, THUMB_H + 38)
+        self.viewer_grid.setUpdatesEnabled(False)
+        pending = []
+        for name in names:
+            path = os.path.join(folder, name)
+            it = QListWidgetItem(placeholder, name)
+            it.setData(Qt.ItemDataRole.UserRole, path)     # a str: safe through Qt
+            it.setToolTip(path)
+            it.setSizeHint(cell)                           # fixed cell = aligned grid
+            it.setTextAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom)
+            self.viewer_grid.addItem(it)
+            self.thumb_rows[path] = self.viewer_grid.count() - 1
+            self.viewer_media.append((path, file_datetime(name, path)))
+            cached = self.thumb_cache.get(path)
+            if cached is not None:
+                it.setIcon(QIcon(cached))
+            else:
+                pending.append(path)
+        self.viewer_grid.setUpdatesEnabled(True)
+        if pending:
+            self.thumb_pool.submit(pending)
+        year_item = self.viewer_years.currentItem()
+        self.viewer_count.setText(f"🖼️ {len(names)} média(s) — {os.path.basename(folder)}")
+        self.viewer_timeline.set_points(
+            [(dt, os.path.basename(p)) for p, dt in self.viewer_media],
+            year=year_item.text() if year_item else None)
+
+    def empty_thumb(self):
+        """Uniform placeholder so every cell has the same size from the start"""
+        if getattr(self, '_empty_thumb', None) is None:
+            pm = QPixmap(THUMB_W, THUMB_H)
+            pm.fill(QColor('#232428'))
+            self._empty_thumb = pm
+        return self._empty_thumb
+
+    def framed_thumb(self, qimage):
+        """Center the image on a fixed canvas: identical icons, perfect alignment"""
+        pm = QPixmap(THUMB_W, THUMB_H)
+        pm.fill(QColor('#1a1a1c'))
+        scaled = QPixmap.fromImage(qimage).scaled(
+            THUMB_W, THUMB_H, Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation)
+        painter = QPainter(pm)
+        painter.drawPixmap((THUMB_W - scaled.width()) // 2,
+                           (THUMB_H - scaled.height()) // 2, scaled)
+        painter.end()
+        return pm
+
+    def on_thumb_ready(self, path, qimage):
+        """Thumbnails arrive out of order: find the item that asked for this one"""
+        if qimage is None:
+            return
+        pm = self.framed_thumb(qimage)
+        self.thumb_cache[path] = pm
+        while len(self.thumb_cache) > THUMB_CACHE_MAX:
+            self.thumb_cache.popitem(last=False)
+        row = self.thumb_rows.get(path)
+        if row is not None and row < self.viewer_grid.count():
+            it = self.viewer_grid.item(row)
+            if it is not None and it.data(Qt.ItemDataRole.UserRole) == path:
+                it.setIcon(QIcon(pm))
+                return
+        for row in range(self.viewer_grid.count()):     # rows moved (a deletion)
+            it = self.viewer_grid.item(row)
+            if it.data(Qt.ItemDataRole.UserRole) == path:
+                it.setIcon(QIcon(pm))
+                return
+
+    def on_year_view_toggled(self, checked):
+        year_item = self.viewer_years.currentItem()
+        self.viewer_timeline.set_year_mode(checked,
+                                           year_item.text() if year_item else None)
+
+    def rebuild_timeline(self):
+        """Timeline always mirrors the grid, in the same order"""
+        known = dict(self.viewer_media)
+        media = []
+        for row in range(self.viewer_grid.count()):
+            path = self.viewer_grid.item(row).data(Qt.ItemDataRole.UserRole)
+            dt = known.get(path) or file_datetime(os.path.basename(path), path)
+            media.append((path, dt))
+        self.viewer_media = media
+        year_item = self.viewer_years.currentItem()
+        self.viewer_timeline.set_points([(dt, os.path.basename(p)) for p, dt in media],
+                                        year=year_item.text() if year_item else None)
+
+    def on_viewer_selection(self):
+        rows = [i.row() for i in self.viewer_grid.selectedIndexes()]
+        self.viewer_timeline.set_selected(rows[0] if rows else -1)
+
+    def on_timeline_picked(self, index):
+        if 0 <= index < self.viewer_grid.count():
+            self.viewer_grid.setCurrentRow(index)
+            self.viewer_grid.scrollToItem(self.viewer_grid.item(index),
+                                          QAbstractItemView.ScrollHint.EnsureVisible)
+
+    def viewer_selected_paths(self):
+        return [it.data(Qt.ItemDataRole.UserRole) for it in self.viewer_grid.selectedItems()]
+
+    def viewer_grid_menu(self, pos):
+        it = self.viewer_grid.itemAt(pos)
+        if it is None:
+            return
+        if it not in self.viewer_grid.selectedItems():
+            self.viewer_grid.setCurrentItem(it)
+        menu = QMenu(self)
+        single = len(self.viewer_grid.selectedItems()) == 1
+        act = menu.addAction("✏️ Renommer…")
+        act.setEnabled(single)
+        act.triggered.connect(self.viewer_rename)
+        menu.addAction("▶️ Ouvrir").triggered.connect(self.viewer_open)
+        menu.addAction("📂 Ouvrir le dossier").triggered.connect(self.viewer_open_folder)
+        menu.addSeparator()
+        menu.addAction("🗑️ Supprimer (corbeille)").triggered.connect(self.viewer_delete)
+        menu.exec(self.viewer_grid.viewport().mapToGlobal(pos))
+
+    def viewer_folder_menu(self, pos):
+        it = self.viewer_folders.itemAt(pos)
+        if it is None:
+            return
+        self.viewer_folders.setCurrentItem(it)
+        menu = QMenu(self)
+        menu.addAction("📂 Ouvrir le dossier").triggered.connect(
+            lambda: os.startfile(self.viewer_current_folder()))
+        menu.exec(self.viewer_folders.viewport().mapToGlobal(pos))
+
+    def viewer_open(self):
+        for path in self.viewer_selected_paths()[:5]:
+            if path and os.path.isfile(path):
+                try:
+                    os.startfile(path)
+                except Exception as e:
+                    log(f"❌ Ouverture {os.path.basename(path)}: {e}")
+
+    def viewer_open_folder(self):
+        folder = self.viewer_current_folder()
+        if folder and os.path.isdir(folder):
+            os.startfile(folder)
+
+    def viewer_rename(self):
+        items = self.viewer_grid.selectedItems()
+        if len(items) != 1:
+            self.statusBar().showMessage("Sélectionne un seul média pour le renommer")
+            return
+        it = items[0]
+        old = it.data(Qt.ItemDataRole.UserRole)
+        if not old or not os.path.isfile(old):
+            return
+        folder, current = os.path.split(old)
+        new_name, ok = QInputDialog.getText(self, "Renommer", "Nouveau nom :", text=current)
+        new_name = (new_name or '').strip()
+        if not ok or not new_name or new_name == current:
+            return
+        new_path = os.path.join(folder, new_name)
+        if os.path.exists(new_path):
+            QMessageBox.warning(self, "Renommer", f"« {new_name} » existe déjà ici.")
+            return
+        try:
+            os.rename(old, new_path)
+        except Exception as e:
+            log(f"❌ Renommage {current}: {e}")
+            QMessageBox.warning(self, "Renommer", f"Échec du renommage :\n{e}")
+            return
+        log(f"✏️ Renommé: {current} -> {new_name}")
+        it.setText(new_name)
+        it.setData(Qt.ItemDataRole.UserRole, new_path)
+        it.setToolTip(new_path)
+        row = self.viewer_grid.row(it)
+        if 0 <= row < len(self.viewer_media):
+            self.viewer_media[row] = (new_path, self.viewer_media[row][1])
+        self.statusBar().showMessage(f"✏️ Renommé en « {new_name} »")
+
+    def viewer_delete(self):
+        items = self.viewer_grid.selectedItems()
+        if not items:
+            return
+        if len(items) > 1 and QMessageBox.question(
+                self, "Supprimer",
+                f"Envoyer {len(items)} média(s) à la corbeille ?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        next_row = min(self.viewer_grid.row(it) for it in items)
+        deleted = errors = 0
+        for it in items:
+            path = it.data(Qt.ItemDataRole.UserRole)
+            try:
+                from send2trash import send2trash
+                send2trash(os.path.normpath(path))
+                log(f"🗑️ Corbeille: {os.path.relpath(path, self.base_path)}")
+                self.viewer_grid.takeItem(self.viewer_grid.row(it))
+                deleted += 1
+            except Exception as e:
+                log(f"❌ Suppression {os.path.basename(path or '?')}: {e}")
+                errors += 1
+        self.rebuild_timeline()
+        self.viewer_count.setText(f"🖼️ {self.viewer_grid.count()} média(s)")
+        if self.viewer_grid.count():
+            self.viewer_grid.setCurrentRow(min(next_row, self.viewer_grid.count() - 1))
+        self.statusBar().showMessage(f"🗑️ {deleted} média(s) à la corbeille"
+                                     + (f", {errors} erreur(s)" if errors else ""))
+
+    # ---------- Startup / scan ----------
+
+    def startup_load(self):
+        base = self.base_path
+        if not base or not os.path.isdir(base):
+            log(f"❌ Camera folder not found: {base}")
+            self.statusBar().showMessage(f"❌ Dossier introuvable : {base}")
+            return
+        self.video_cache_dir = os.path.join(base, '!tempvideoscreen')
+        self.purge_video_cache()
+        try:
+            self.analyze_renames()
+        except Exception as e:
+            log(f"❌ Rename analysis error: {e}")
+        self.scan_media()
+
+    def scan_media(self):
+        base = self.base_path
+        if not os.path.isdir(base):
+            return
+        log("[SCAN] ========== Starting folder scan ==========")
+        self.statusBar().showMessage("🔄 Scan en cours…")
+        QApplication.processEvents()
+
+        edits = load_json(EDITS_FILE, {})
+        self.files = []
+        for filename in sorted(os.listdir(base)):
+            filepath = os.path.join(base, filename)
+            if os.path.isdir(filepath):
+                continue
+            ext = os.path.splitext(filename)[1].lower()
+            if ext not in (IMAGE_EXTS | VIDEO_EXTS):
+                continue
+            m = re.search(r'(20\d{2})', filename)
+            if m:
+                year = m.group(1)
+            else:
+                year = get_year_from_file(filename, filepath) or ''
+                if year:
+                    log(f"[SCAN] Year from EXIF/date for {filename}: {year}")
+            dt = file_datetime(filename, filepath)
+            self.files.append({
+                'filename': filename, 'filepath': filepath, 'ext': ext,
+                'datetime': dt, 'year': year, 'folder': edits.get(filename, '')
+            })
+        # Chronological, photos and videos mixed together
+        self.files.sort(key=lambda x: (x['datetime'] or datetime.min, x['filename']))
+        log(f"[SCAN] Files to organize: {len(self.files)}")
+        self.fill_file_table()
+        self.statusBar().showMessage(f"🔄 {len(self.files)} fichier(s) à trier")
+
+    def fill_file_table(self):
+        self._filling = True
+        self.file_table.setSortingEnabled(False)
+        self.file_table.setRowCount(0)
+        self.files_by_uid = {}
+        for index, info in enumerate(self.files):
+            row = self.file_table.rowCount()
+            self.file_table.insertRow(row)
+            it_name = QTableWidgetItem(info['filename'])
+            # The row carries the entry's uid, NOT the dict itself: PySide converts a
+            # Python dict to a QVariantMap, so reading it back gives a *copy* and every
+            # edit made through the row would be silently lost.
+            info.setdefault('uid', id(info))
+            self.files_by_uid[info['uid']] = info
+            it_name.setData(Qt.ItemDataRole.UserRole, int(info['uid']))
+            it_name.setFlags(it_name.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            dt = info['datetime']
+            # Sorts on the real timestamp, not on the displayed text
+            it_dt = SortableItem(dt.strftime('%Y-%m-%d %H:%M:%S') if dt else '—',
+                                 dt or datetime.min)
+            it_dt.setFlags(it_dt.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            it_year = QTableWidgetItem(info['year'])
+            it_folder = QTableWidgetItem(info['folder'])
+            it_folder.setFlags(it_folder.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.file_table.setItem(row, 0, it_name)
+            self.file_table.setItem(row, 1, it_dt)
+            self.file_table.setItem(row, 2, it_year)
+            self.file_table.setItem(row, 3, it_folder)
+            self.update_row_dest(row)
+            self.apply_row_color(row)
+        self._filling = False
+        self.file_table.setSortingEnabled(True)
+        self.apply_saved_sort('files', self.file_table, 1)   # 1 = Date et heure
+        if self.files:
+            self.file_table.selectRow(0)
+        self.start_prefetch()
+
+    def finfo(self, row):
+        """The real entry attached to a row - the same object as in self.files, so
+        editing it actually changes what gets moved. Rows move (sorting) and vanish
+        (deletion), so nothing here may rely on row numbers."""
+        it = self.file_table.item(row, 0) if 0 <= row < self.file_table.rowCount() else None
+        uid = it.data(Qt.ItemDataRole.UserRole) if it else None
+        info = self.files_by_uid.get(uid) if uid is not None else None
+        if info is not None:
+            return info
+        return self.files[row] if 0 <= row < len(self.files) else None
+
+    def sync_folders_from_table(self):
+        """The table is what you saw and trusted: make the data match it before
+        saving or moving anything. Guards against any future desync."""
+        fixed = 0
+        for row in range(self.file_table.rowCount()):
+            info = self.finfo(row)
+            cell = self.file_table.item(row, 3)
+            if info is None or cell is None:
+                continue
+            shown = cell.text().strip()
+            if shown and info.get('folder') != shown:
+                info['folder'] = shown
+                fixed += 1
+        if fixed:
+            log(f"⚠️ {fixed} dossier(s) resynchronisé(s) depuis le tableau")
+        return fixed
+
+    def update_row_dest(self, row):
+        """No Destination column any more: the target lives in the tooltip"""
+        info = self.finfo(row)
+        if info is None:
+            return
+        dest = (f"→ {info['year']}\\{info['folder']}\\{info['filename']}"
+                if (info['year'] and info['folder']) else "⚠️ Aucun dossier choisi")
+        it = self.file_table.item(row, 3)
+        if it:
+            it.setToolTip(dest)
+
+    def apply_row_color(self, row):
+        info = self.finfo(row)
+        if info is None:
+            return
+        color = folder_color(info['folder']) if info['folder'] else None
+        for col in range(4):
+            it = self.file_table.item(row, col)
+            if it:
+                if color:
+                    it.setBackground(color)
+                else:
+                    it.setBackground(QColor(0, 0, 0, 0))
+
+    def on_file_item_changed(self, item):
+        if self._filling or item.column() != 2:       # 2 = Année (the only editable one)
+            return
+        row = item.row()
+        info = self.finfo(row)
+        if info is not None:
+            info['year'] = item.text().strip()
+            self._filling = True
+            self.update_row_dest(row)
+            self._filling = False
+            self.refresh_folder_list(info['year'])
+
+    def on_file_selection(self):
+        rows = sorted({idx.row() for idx in self.file_table.selectedIndexes()})
+        if not rows:
+            return
+        info = self.finfo(rows[0])
+        if info is None:
+            return
+        if info['year']:
+            self.refresh_folder_list(info['year'])
+        self.display_file(info)
+
+    def refresh_folder_list(self, year):
+        self.folders_label.setText(f"📁 Dossiers {year}")
+        self.folder_list.clear()
+        year_folder = os.path.join(self.base_path, year)
+        if not os.path.isdir(year_folder):
+            return
+        folders = [f for f in sorted(os.listdir(year_folder))
+                   if os.path.isdir(os.path.join(year_folder, f)) and not f.startswith('!')]
+        for folder in folders:
+            it = QListWidgetItem(folder)
+            it.setBackground(folder_color(folder))
+            self.folder_list.addItem(it)
+
+    def current_year(self):
+        """Year of the folder list currently displayed"""
+        return self.folders_label.text().replace("📁 Dossiers", "").strip()
+
+    def folder_context_menu(self, pos):
+        item = self.folder_list.itemAt(pos)
+        if item is None:
+            return
+        self.folder_list.setCurrentItem(item)
+        menu = QMenu(self)
+        menu.addAction("✏️ Renommer le dossier…").triggered.connect(
+            lambda: self.rename_folder(item))
+        menu.addAction("📂 Ouvrir le dossier").triggered.connect(
+            lambda: self.open_folder(item))
+        menu.exec(self.folder_list.viewport().mapToGlobal(pos))
+
+    def folder_path_of(self, item):
+        year = self.current_year()
+        return os.path.join(self.base_path, year, item.text()) if year else None
+
+    def open_folder(self, item):
+        path = self.folder_path_of(item)
+        if path and os.path.isdir(path):
+            os.startfile(path)
+
+    def rename_folder(self, item):
+        old_path = self.folder_path_of(item)
+        if not old_path or not os.path.isdir(old_path):
+            self.statusBar().showMessage("Dossier introuvable")
+            return
+        old_name = item.text()
+        new_name, ok = QInputDialog.getText(self, "Renommer le dossier",
+                                            f"Année {self.current_year()} :",
+                                            text=old_name)
+        new_name = (new_name or '').strip()
+        if not ok or not new_name or new_name == old_name:
+            return
+        new_path = os.path.join(os.path.dirname(old_path), new_name)
+        if os.path.exists(new_path):
+            QMessageBox.warning(self, "Renommer",
+                                f"« {new_name} » existe déjà pour cette année.")
+            return
+        try:
+            os.rename(old_path, new_path)
+        except Exception as e:
+            log(f"❌ Renommage dossier {old_name}: {e}")
+            QMessageBox.warning(self, "Renommer", f"Échec du renommage :\n{e}")
+            return
+        log(f"✏️ Dossier renommé: {old_name} -> {new_name}")
+        item.setText(new_name)
+        item.setBackground(folder_color(new_name))
+        # Files already assigned to the old name follow it
+        moved = 0
+        for row in range(self.file_table.rowCount()):
+            info = self.finfo(row)
+            if info and info.get('folder') == old_name:
+                self.assign_folder_to_rows([row], new_name)
+                moved += 1
+        self.statusBar().showMessage(f"✏️ Dossier renommé en « {new_name} »"
+                                     + (f" ({moved} fichier(s) suivis)" if moved else ""))
+
+    def on_folder_clicked(self, list_item):
+        folder = list_item.text()
+        rows = sorted({idx.row() for idx in self.file_table.selectedIndexes()})
+        if not rows:
+            self.statusBar().showMessage("Sélectionne d'abord des fichiers")
+            return
+        self.assign_folder_to_rows(rows, folder)
+        self.statusBar().showMessage(f"📁 {len(rows)} fichier(s) → {folder}")
+
+    def assign_folder_to_rows(self, rows, folder):
+        """Assign in one repaint instead of one per cell, and save on a timer:
+        clicking a folder with 200 files selected was redrawing ~1000 cells."""
+        self._filling = True
+        # Changing a cell while sorting is on makes QTableWidget re-sort the whole
+        # table, which throws the view back to the top. Turn it off for the update
+        # and put the scrollbar back exactly where it was.
+        was_sorting = self.file_table.isSortingEnabled()
+        scroll = self.file_table.verticalScrollBar().value()
+        self.file_table.setSortingEnabled(False)
+        self.file_table.setUpdatesEnabled(False)
+        self.file_table.blockSignals(True)
+        try:
+            for row in rows:
+                info = self.finfo(row)
+                if info is None:
+                    continue
+                info['folder'] = folder
+                self.file_table.item(row, 3).setText(folder)
+                self.update_row_dest(row)
+                self.apply_row_color(row)
+        finally:
+            self.file_table.blockSignals(False)
+            self.file_table.setSortingEnabled(was_sorting)
+            self.file_table.setUpdatesEnabled(True)
+            self.file_table.verticalScrollBar().setValue(scroll)
+            self._filling = False
+        self.schedule_save_edits()
+
+    def schedule_save_edits(self):
+        """Debounced write: assigning several folders in a row rewrites the file once"""
+        self.save_timer.start(600)
+
+    def create_new_folder(self):
+        name = self.new_folder_edit.text().strip()
+        if not name:
+            return
+        rows = sorted({idx.row() for idx in self.file_table.selectedIndexes()})
+        if not rows:
+            self.statusBar().showMessage("Sélectionne d'abord des fichiers")
+            return
+        first = self.finfo(rows[0])
+        year = first['year'] if first else ''
+        if not year:
+            self.statusBar().showMessage("❌ Année inconnue pour le fichier sélectionné")
+            return
+        try:
+            os.makedirs(os.path.join(self.base_path, year, name), exist_ok=True)
+        except Exception as e:
+            log(f"❌ Cannot create folder {name}: {e}")
+            return
+        self.assign_folder_to_rows(rows, name)
+        self.refresh_folder_list(year)
+        self.new_folder_edit.clear()
+        self.statusBar().showMessage(f"✨ Créé et assigné à {len(rows)} fichier(s) : {name}")
+
+    def save_edits(self):
+        self.sync_folders_from_table()
+        edits = {info['filename']: info['folder'] for info in self.files if info['folder']}
+        previous = load_json(EDITS_FILE, {})
+        # Never silently shrink the file: keep a copy first, so a bug can't wipe
+        # an afternoon of tagging.
+        if previous and len(edits) < len(previous):
+            try:
+                save_json(EDITS_FILE + '.bak', previous)
+                log(f"💾 Sauvegarde: {len(previous)} tag(s) copiés dans "
+                    f"{os.path.basename(EDITS_FILE)}.bak (nouveau total: {len(edits)})")
+            except Exception as e:
+                log(f"⚠️ Backup des tags impossible: {e}")
+        save_json(EDITS_FILE, edits)
+
+    # ---------- Actions ----------
+
+    def apply_moves(self):
+        self.sync_folders_from_table()      # trust what is on screen
+        moved = 0
+        errors = []
+        remaining = []
+        targets = sum(1 for i in self.files if i['year'] and i['folder'])
+        if not targets:
+            self.statusBar().showMessage("Aucun fichier n'a d'année ET de dossier assignés")
+            log("⚠️ APPLIQUER: rien à déplacer")
+            return
+        for info in self.files:
+            if info['year'] and info['folder']:
+                target = os.path.join(self.base_path, info['year'], info['folder'])
+                try:
+                    safe_move(info['filepath'], target,
+                              dup_dir=os.path.join(self.base_path, '!duplicate'))
+                    log(f"Moved: {info['filename']} -> {info['year']}/{info['folder']}/")
+                    moved += 1
+                    continue
+                except Exception as e:
+                    errors.append(f"{info['filename']}: {e}")
+                    log(f"❌ Error moving {info['filename']}: {e}")
+            remaining.append(info)
+        self.files = remaining
+        self.fill_file_table()
+        msg = f"✅ {moved} fichier(s) déplacé(s)"
+        if errors:
+            msg += f" — {len(errors)} erreur(s)"
+        self.statusBar().showMessage(msg)
+
+    def delete_selected(self):
+        rows = sorted({idx.row() for idx in self.file_table.selectedIndexes()})
+        if not rows:
+            return
+        next_row = rows[0]
+        deleted = errors = 0
+        removed = set()
+        # Remove only the affected rows: rebuilding the whole table was what froze
+        # the UI for a second on every delete.
+        self.file_table.setUpdatesEnabled(False)
+        self.file_table.blockSignals(True)
+        try:
+            for row in sorted(rows, reverse=True):
+                info = self.finfo(row)
+                if info is None:
+                    continue
+                path = os.path.normpath(info['filepath'])
+                try:
                     try:
                         from send2trash import send2trash
-                        send2trash(screenshot_path)
-                        auto_delete_count += 1
-                        print(f"[DUPLICATES]     Deleted: {screenshot_path}")
+                        send2trash(path)
+                    except ImportError:
+                        os.remove(path)
                     except Exception as e:
-                        print(f"[DUPLICATES] Error deleting {screenshot_path}: {e}")
-            
-            elif len(organized_paths) >= 2:
-                # CONFLICT: Multiple organized folders
-                print(f"[DUPLICATES]   → CONFLICT (multiple organized folders)")
-                conflicts.append((filename, organized_paths))
-        
-        print(f"[DUPLICATES] Total duplicates found: {duplicates_found}")
-        print(f"[DUPLICATES] Auto-deleted: {auto_delete_count}")
-        print(f"[DUPLICATES] Conflicts: {len(conflicts)}")
-        
-        # Show results
-        if auto_delete_count > 0:
-            self.status_var.set(f"✅ Auto-deleted {auto_delete_count} screenshot duplicates")
-        
-        if conflicts:
-            print(f"[DUPLICATES] Showing conflict dialog...")
-            self.show_duplicate_conflicts(conflicts)
+                        log(f"send2trash failed, direct delete: {e}")
+                        os.remove(path)
+                    removed.add(info.get('uid', id(info)))
+                    self.preview_cache.pop(info['filepath'], None)
+                    self.file_table.removeRow(row)
+                    deleted += 1
+                except Exception as e:
+                    log(f"❌ Error deleting {info['filename']}: {e}")
+                    errors += 1
+        finally:
+            self.file_table.blockSignals(False)
+            self.file_table.setUpdatesEnabled(True)
+        if removed:
+            self.files = [f for f in self.files if f.get('uid', id(f)) not in removed]
+            for uid in removed:
+                self.files_by_uid.pop(uid, None)
+        if self.file_table.rowCount():
+            self.file_table.selectRow(min(next_row, self.file_table.rowCount() - 1))
         else:
-            if auto_delete_count == 0:
-                messagebox.showinfo("Check Duplicates", "No duplicates found")
-            else:
-                messagebox.showinfo("Check Duplicates", 
-                                  f"Auto-deleted {auto_delete_count} screenshot duplicates\nNo conflicts found")
-        
-        print(f"[DUPLICATES] ========== Duplicate check complete ==========\n")
+            self.current_filepath = None
+            self.current_pixmap = None
+            self.viewer_label.setPixmap(QPixmap())
+            self.viewer_label.setText("")
+        self.statusBar().showMessage(f"🗑️ {deleted} fichier(s) supprimé(s)" + (f", {errors} erreur(s)" if errors else ""))
 
-    def show_duplicate_conflicts(self, conflicts):
-        """Show UI for handling duplicate conflicts"""
-        dialog = tk.Toplevel(self.root)
-        dialog.title(f"Duplicate Conflicts ({len(conflicts)} files)")
-        dialog.geometry("800x600")
-        dialog.transient(self.root)
-        
-        # Header
-        ttk.Label(dialog, text="Files found in multiple organized folders:", 
-                  font=('Arial', 12, 'bold')).pack(pady=10)
-        
-        # Listbox for conflicts
-        list_frame = ttk.Frame(dialog)
-        list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        conflict_listbox = tk.Listbox(list_frame, font=('Consolas', 9), height=20)
-        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=conflict_listbox.yview)
-        conflict_listbox.configure(yscrollcommand=scrollbar.set)
-        
-        conflict_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        # Populate listbox
-        for filename, paths in conflicts:
-            conflict_listbox.insert(tk.END, f"📄 {filename}")
-            for path in paths:
-                # Show relative path
-                rel_path = os.path.relpath(path, self.base_path.get())
-                conflict_listbox.insert(tk.END, f"   → {rel_path}")
-            conflict_listbox.insert(tk.END, "")  # Blank line
-        
-        # Buttons
-        button_frame = ttk.Frame(dialog)
-        button_frame.pack(fill=tk.X, padx=10, pady=10)
-        
-        def ignore_selected():
-            """Add selected files to ignore list"""
-            selection = conflict_listbox.curselection()
-            ignored_count = 0
-            
-            for idx in selection:
-                text = conflict_listbox.get(idx)
-                if text.startswith("📄 "):
-                    filename = text[2:].strip()
-                    self.duplicate_ignore_list.add(filename)
-                    ignored_count += 1
-            
-            if ignored_count > 0:
-                self.save_ignore_list()
-                messagebox.showinfo("Ignored", f"Added {ignored_count} file(s) to ignore list")
-                dialog.destroy()
-        
-        def open_folder():
-            """Open folder containing selected file"""
-            selection = conflict_listbox.curselection()
-            if not selection:
-                return
-            
-            idx = selection[0]
-            text = conflict_listbox.get(idx)
-            
-            # Find the file data
-            if text.startswith("   → "):
-                folder_path = os.path.dirname(os.path.join(self.base_path.get(), text[5:].strip()))
-                if os.path.exists(folder_path):
-                    os.startfile(folder_path)
-        
-        ttk.Button(button_frame, text="Ignore Selected", command=ignore_selected).pack(side=tk.LEFT, padx=5)
-        ttk.Button(button_frame, text="Open Folder", command=open_folder).pack(side=tk.LEFT, padx=5)
-        ttk.Button(button_frame, text="Close", command=dialog.destroy).pack(side=tk.RIGHT, padx=5)
-        
-        # Instructions
-        instructions = ttk.Label(dialog, 
-                                text="Select files and click 'Ignore Selected' to stop checking them in future scans\n"
-                                     "OR manually delete unwanted copies using 'Open Folder' button",
-                                foreground="gray")
-        instructions.pack(pady=5)
+    def run_auto_organize(self):
+        base = self.base_path
+        log("--- Auto-organize started ---")
+        recorder = os.path.normpath(os.path.join(base, '..', 'ScreenRecorder'))
+        pictures = os.path.normpath(os.path.join(base, '..', '..', 'Pictures'))
+        r_count = self.sort_external_folder(recorder, 'ScreenRecorder')
+        p_count = self.sort_external_folder(pictures, 'Pictures')
+
+        c_count = 0
+        for filename in os.listdir(base):
+            filepath = os.path.join(base, filename)
+            if os.path.isdir(filepath):
+                continue
+            is_screenshot = 'screenshot' in filename.lower()
+            is_recorder = 'screen' in filename.lower() and 'recorder' in filename.lower()
+            if not (is_screenshot or is_recorder):
+                continue
+            year = get_year_from_file(filename, filepath)
+            if not year:
+                log(f"⚠️ No year found, skipped: {filename}")
+                continue
+            folder = f"!Screenshots_{year}" if is_screenshot else f"!ScreenRecorder_{year}"
+            try:
+                safe_move(filepath, os.path.join(base, year, folder),
+                          dup_dir=os.path.join(base, '!duplicate'))
+                log(f"Moved: {filename} -> {year}/{folder}/")
+                c_count += 1
+            except Exception as e:
+                log(f"❌ Error moving {filename}: {e}")
+
+        total = r_count + p_count + c_count
+        log(f"--- Auto-organize done: {total} file(s) (Camera root: {c_count}, ScreenRecorder: {r_count}, Pictures: {p_count}) ---")
+        self.statusBar().showMessage(f"⚡ {total} fichier(s) rangé(s)")
+        self.scan_media()
+
+    def sort_external_folder(self, source_folder, prefix):
+        count = 0
+        if not os.path.isdir(source_folder):
+            log(f"⚠️ Folder not found: {source_folder}")
+            return count
+        log(f"Scanning: {source_folder}")
+        try:
+            entries = os.listdir(source_folder)
+        except Exception as e:
+            log(f"❌ Cannot list {source_folder}: {e}")
+            return count
+        for filename in entries:
+            filepath = os.path.join(source_folder, filename)
+            if os.path.isdir(filepath):
+                continue
+            ext = os.path.splitext(filename)[1].lower()
+            if ext not in (IMAGE_EXTS | VIDEO_EXTS):
+                log(f"   Skipped (extension): {filename}")
+                continue
+            year = get_year_from_file(filename, filepath)
+            if not year:
+                log(f"⚠️ No year found, skipped: {filename}")
+                continue
+            try:
+                safe_move(filepath, os.path.join(self.base_path, year, f"!{prefix}_{year}"),
+                          dup_dir=os.path.join(self.base_path, '!duplicate'))
+                log(f"Moved: {filename} -> {year}/!{prefix}_{year}/")
+                count += 1
+            except Exception as e:
+                log(f"❌ Error moving {filename}: {e}")
+        return count
+
+    # ---------- Viewer ----------
+
+    def display_file(self, info):
+        """Never blocks: shows whatever is cached and lets the worker deliver the rest"""
+        self.cleanup_screenshots()
+        path = info['filepath']
+        self.current_filepath = path
+        self.file_label.setText(info['filename'])
+        self.zoom = 1.0
+        self.video_bar.setVisible(False)
+
+        if info['ext'] in VIDEO_EXTS:
+            self.video_bar.setVisible(True)
+            try:
+                default_index = VIDEO_PERCENTS.index(DEFAULT_SHOT_PCT)
+            except ValueError:
+                default_index = 0
+            self.show_video_percent(default_index)
+            return
+
+        if info['ext'] not in IMAGE_EXTS:
+            self.current_pixmap = None
+            self.viewer_label.setPixmap(QPixmap())
+            self.viewer_label.setText("📄 Pas d'aperçu pour ce type de fichier")
+            return
+
+        if not PIL_AVAILABLE:
+            self.viewer_label.setText("❌ Pillow non installé")
+            return
+
+        cached = self.preview_cache.get(path)
+        if cached is not None:
+            self.preview_cache.move_to_end(path)
+            self.current_pixmap = QPixmap.fromImage(cached)
+            self.render_image()
+        else:
+            # Keep the previous image on screen rather than flashing to black
+            self.loader.request('image', path)
+        self.prefetch_neighbours()
+
+    def prefetch_neighbours(self):
+        """Decode the next and previous photos while you look at this one"""
+        rows = sorted({idx.row() for idx in self.file_table.selectedIndexes()})
+        if not rows:
+            return
+        row = rows[0]
+        for offset in (1, 2, -1, 3):
+            r = row + offset
+            if not (0 <= r < self.file_table.rowCount()):
+                continue
+            info = self.finfo(r)
+            if not info or info['ext'] not in IMAGE_EXTS:
+                continue
+            if info['filepath'] not in self.preview_cache:
+                self.loader.request('image', info['filepath'])
+
+    def on_preview_ready(self, path, qimage):
+        self.preview_cache[path] = qimage
+        while len(self.preview_cache) > PREVIEW_CACHE_MAX:
+            self.preview_cache.popitem(last=False)
+        if path == self.current_filepath:
+            self.current_pixmap = QPixmap.fromImage(qimage)
+            self.render_image()
+
+    def on_shot_ready(self, path, pct, jpg):
+        """A frame requested on the fly arrived. Ignore it if you already moved on."""
+        if path != self.current_filepath or pct != self.current_shot_pct:
+            return
+        if jpg and os.path.exists(jpg):
+            self.current_pixmap = QPixmap(jpg)
+            self.zoom = 1.0
+            self.render_image()
+        else:
+            self.current_pixmap = None
+            self.viewer_label.setPixmap(QPixmap())
+            self.viewer_label.setText("▶️ Vidéo — double-clic pour ouvrir"
+                                      if not FFMPEG else "❌ Image non extractible")
+
+    def render_image(self):
+        if not self.current_pixmap:
+            return
+        size = self.viewer_scroll.viewport().size()
+        target = QSize(int(size.width() * self.zoom), int(size.height() * self.zoom))
+        scaled = self.current_pixmap.scaled(target, Qt.AspectRatioMode.KeepAspectRatio,
+                                            Qt.TransformationMode.SmoothTransformation)
+        self.viewer_label.setText("")
+        self.viewer_label.setPixmap(scaled)
+
+    def eventFilter(self, obj, event):
+        if obj is self.viewer_scroll.viewport() and event.type() == QEvent.Type.Wheel:
+            if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                self.zoom *= 1.1 if event.angleDelta().y() > 0 else 0.9
+                self.zoom = max(0.2, min(self.zoom, 10.0))
+                self.render_image()
+                return True
+        return super().eventFilter(obj, event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.render_image()
+
+    def show_video_percent(self, index):
+        """Show the frame at that percentage, extracting it on the spot if needed.
+        One ffmpeg call, in the background: no more waiting for eleven frames."""
+        path = self.current_filepath
+        if not path:
+            return
+        index = max(0, min(index, len(VIDEO_PERCENTS) - 1))
+        pct = VIDEO_PERCENTS[index]
+        # Checking a radio emits toggled, which would call us again
+        for i, b in enumerate(self.video_buttons):
+            if b.isChecked() != (i == index):
+                b.blockSignals(True)
+                b.setChecked(i == index)
+                b.blockSignals(False)
+        self.current_shot_pct = pct
+        jpg = shot_path(path, self.video_cache_dir, pct)
+        if jpg and os.path.exists(jpg):
+            self.current_pixmap = QPixmap(jpg)
+            self.zoom = 1.0
+            self.render_image()
+            return
+        if not FFMPEG or not self.video_cache_dir:
+            self.current_pixmap = None
+            self.viewer_label.setPixmap(QPixmap())
+            self.viewer_label.setText("▶️ Vidéo — double-clic pour ouvrir")
+            return
+        # Keep the current frame on screen while the new one is extracted
+        self.statusBar().showMessage(f"🎬 Image à {pct} %…")
+        self.loader.request('shot', path, (self.video_cache_dir, pct))
+
+    def play_current_video(self):
+        self.open_current_file()
+
+    def open_current_file(self):
+        """Double-click on the preview (image or video) opens the real file"""
+        if self.current_filepath and os.path.exists(self.current_filepath):
+            try:
+                os.startfile(self.current_filepath)
+            except Exception as e:
+                log(f"❌ Ouverture {os.path.basename(self.current_filepath)}: {e}")
+
+    # ----- background prefetch of the sort tab's video previews -----
+
+    def start_prefetch(self):
+        """One frame per video (25 %), in the background. The other percentages
+        are extracted only when you click their button."""
+        self.stop_prefetch()
+        if not FFMPEG or not self.video_cache_dir:
+            return
+        pending = [i['filepath'] for i in self.files
+                   if i['ext'] in VIDEO_EXTS
+                   and not os.path.exists(shot_path(i['filepath'], self.video_cache_dir,
+                                                    DEFAULT_SHOT_PCT) or '')]
+        if not pending:
+            return
+        self.prefetch_worker = PrefetchWorker(pending, self.video_cache_dir,
+                                              DEFAULT_SHOT_PCT, self)
+        self.prefetch_worker.advanced.connect(self.on_prefetch_progress)
+        self.prefetch_worker.finished.connect(
+            lambda: self.statusBar().showMessage("🎬 Aperçus vidéo prêts"))
+        self.prefetch_worker.start()
+        log(f"🎬 Préchargement des aperçus: {len(pending)} vidéo(s)")
+
+    def stop_prefetch(self, blocking=False):
+        w = getattr(self, 'prefetch_worker', None)
+        if w and w.isRunning():
+            w.stop()
+            if blocking:            # only on exit: waiting here would freeze the UI
+                w.wait(3000)
+        self.prefetch_worker = None
+
+    def on_prefetch_progress(self, done, total):
+        if done % 5 == 0 or done == total:
+            self.statusBar().showMessage(f"🎬 Préchargement des aperçus… {done}/{total}")
+
+    def cleanup_screenshots(self):
+        """Stop showing them, but keep the jpgs: they are the cache that makes the
+        next selection instant. The whole folder is emptied when the app closes."""
+        self.current_screenshots = []
+
+    def purge_video_cache(self, remove_dirs=True):
+        """Empty the temp folders: !tempvideoscreen (video previews) and !temp
+        (duplicate thumbnails). Called at startup and on exit, so nothing of ours
+        is left sitting in your photo folder."""
+        dirs = [self.video_cache_dir]
+        if self.base_path:
+            dirs.append(os.path.join(self.base_path, '!temp'))
+        for d in dirs:
+            if not d or not os.path.isdir(d):
+                continue
+            removed = 0
+            for f in os.listdir(d):
+                try:
+                    os.remove(os.path.join(d, f))
+                    removed += 1
+                except Exception:
+                    pass
+            if removed:
+                log(f"🧹 {os.path.basename(d)}: {removed} fichier(s) temporaire(s) supprimé(s)")
+            if remove_dirs:
+                try:
+                    os.rmdir(d)          # only succeeds when actually empty
+                    log(f"🧹 {os.path.basename(d)}: dossier supprimé")
+                except OSError:
+                    pass
+
+    # ---------- Config ----------
+
+    def on_path_edited(self):
+        path = os.path.normpath(self.path_edit.text().strip())
+        if path and path != self.base_path:
+            self.base_path = path
+            self.config['camera_path'] = path
+            save_json(CONFIG_FILE, self.config)
+            log(f"Camera folder set: {path}")
+
+    def browse_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Choisir le dossier Camera", self.base_path)
+        if folder:
+            self.path_edit.setText(os.path.normpath(folder))
+            self.on_path_edited()
+            self.startup_load()
+
+    # ---------- Column layout persistence ----------
+
+    def header_states(self):
+        return {'dup': self.dup_table, 'rename': self.rename_table, 'files': self.file_table}
+
+    def save_column_layout(self):
+        """Widths, order and sort of every table -> config file"""
+        layout, sorts = {}, {}
+        for name, table in self.header_states().items():
+            try:
+                h = table.horizontalHeader()
+                layout[name] = bytes(h.saveState()).hex()
+                sorts[name] = [h.sortIndicatorSection(), int(h.sortIndicatorOrder().value)]
+            except Exception:
+                pass
+        if layout:
+            self.config['columns'] = layout
+            self.config['sorts'] = sorts
+            save_json(CONFIG_FILE, self.config)
+
+    def apply_saved_sort(self, name, table, default_col, default_desc=False):
+        """Restore the user's sort, or fall back to the sensible default
+        (chronological for the files to sort)."""
+        saved = (self.config.get('sorts') or {}).get(name)
+        col, order_value = (saved if isinstance(saved, list) and len(saved) == 2
+                            else [default_col, 1 if default_desc else 0])
+        if not (0 <= col < table.columnCount()):
+            col, order_value = default_col, 1 if default_desc else 0
+        order = (Qt.SortOrder.DescendingOrder if order_value
+                 else Qt.SortOrder.AscendingOrder)
+        table.sortItems(col, order)
+
+    def restore_column_layout(self):
+        layout = self.config.get('columns') or {}
+        for name, table in self.header_states().items():
+            blob = layout.get(name)
+            if not blob:
+                continue
+            try:
+                table.horizontalHeader().restoreState(QByteArray(bytes.fromhex(blob)))
+            except Exception as e:
+                log(f"⚠️ Colonnes {name}: état illisible ({e})")
+
+    def closeEvent(self, event):
+        if self.save_timer.isActive():     # flush a pending debounced save
+            self.save_timer.stop()
+            self.save_edits()
+        self.save_column_layout()
+        self.stop_background_compare(blocking=True)
+        self.stop_prefetch(blocking=True)
+        if self.loader.isRunning():
+            self.loader.stop()
+            self.loader.wait(2000)
+        self.thumb_pool.stop()
+        self.cleanup_screenshots()
+        self.cleanup_dup_temp()
+        self.purge_video_cache()
+        event.accept()
+
+
+# ==================== THEME ====================
+
+def apply_dark_theme(app):
+    app.setStyle(QStyleFactory.create('Fusion'))
+    p = QPalette()
+    window = QColor('#202124')
+    base = QColor('#2a2b2e')
+    text = QColor('#e8eaed')
+    disabled = QColor('#777777')
+    highlight = QColor('#0a84ff')
+    p.setColor(QPalette.ColorRole.Window, window)
+    p.setColor(QPalette.ColorRole.WindowText, text)
+    p.setColor(QPalette.ColorRole.Base, base)
+    p.setColor(QPalette.ColorRole.AlternateBase, window)
+    p.setColor(QPalette.ColorRole.Text, text)
+    p.setColor(QPalette.ColorRole.Button, QColor('#333438'))
+    p.setColor(QPalette.ColorRole.ButtonText, text)
+    p.setColor(QPalette.ColorRole.Highlight, highlight)
+    p.setColor(QPalette.ColorRole.HighlightedText, QColor('#ffffff'))
+    p.setColor(QPalette.ColorRole.ToolTipBase, base)
+    p.setColor(QPalette.ColorRole.ToolTipText, text)
+    p.setColor(QPalette.ColorRole.PlaceholderText, disabled)
+    p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, disabled)
+    p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, disabled)
+    app.setPalette(p)
+    app.setStyleSheet("""
+        QWidget { font-size: 10pt; }
+        QTableWidget { gridline-color: #3a3b3e; }
+        QHeaderView::section { background: #2a2b2e; color: #e8eaed; border: 0px; padding: 6px; }
+        QTabBar::tab { padding: 8px 18px; }
+        QPushButton { padding: 6px 14px; border-radius: 6px; background: #333438; border: 1px solid #444548; }
+        QPushButton:hover { background: #44454a; }
+        QPushButton:pressed, QPushButton:checked { background: #0a84ff; border-color: #0a84ff; }
+        QLineEdit { padding: 5px; border-radius: 5px; background: #2a2b2e; border: 1px solid #444548; }
+        QListWidget { border: 1px solid #3a3b3e; }
+        QScrollArea { border: 1px solid #3a3b3e; }
+    """)
 
 
 if __name__ == '__main__':
-    root = tk.Tk()
-    app = TriPhotoApp(root)
-    root.mainloop()
+    app = QApplication(sys.argv)
+    apply_dark_theme(app)
+    win = TriPhotoWindow()
+    win.show()
+    sys.exit(app.exec())

@@ -1,0 +1,42 @@
+feat!: v6.0.0 - refonte PySide6, comparaison de contenu, visualiseur
+
+Reecriture complete de l'interface en PySide6 (Qt) et ajout d'un moteur de
+comparaison de contenu pour les doublons.
+
+Nouveautes
+- Onglet Visualiseur : annees > dossiers > grille de vignettes, avec frise
+  chronologique interactive (graduations adaptatives + vue annee 01/01-31/12)
+- Comparaison des doublons sur 3 criteres : taille, empreinte perceptuelle
+  dHash de l'image affichee, duree pour les videos ; videos comparees image
+  par image sur 5 points de leur timeline
+- Colonne Score calculee en tache de fond ; une ligne marquee differente
+  n'est jamais supprimee par le traitement automatique
+- Surlignage des differences entre deux chemins, jusqu'au caractere
+- Detection elargie des copies : _1, -1, ~1, (1), - Copie, _copy, copy 2
+- Colonne Date et heure triable, tri chronologique par defaut
+- Menus contextuels : renommer un media ou un dossier, ouvrir, corbeille
+- Colonnes redimensionnables, deplacables, triables ; disposition memorisee
+- Resolution de ffmpeg : dossier configure > script > PATH > imageio-ffmpeg
+
+Performances
+- Decodage des images hors du thread graphique (mode draft libjpeg)
+- Prechargement des photos voisines, pool de 4 threads pour les vignettes
+- Suppression sans reconstruction du tableau, ecriture des tags differee
+- Une seule image video prechargee (25%), les autres a la demande
+
+Corrections
+- Perte des dossiers assignes : les lignes portaient le dictionnaire du
+  fichier, recopie par Qt, donc les modifications n'atteignaient jamais les
+  donnees (identifiant entier desormais)
+- Dates non reconnues hors du format YYYYMMDD_HHMMSS, qui separaient les
+  photos des videos dans le tri
+- Largeur de colonne impossible a regler ; retour en haut de liste a chaque
+  assignation de dossier
+- Apercus video absents faute de ffmpeg dans le PATH ; captures supprimees
+  a chaque changement de fichier, rendant le cache inutile
+- Grille de vignettes desalignee ; dossiers temporaires laisses dans le
+  dossier photos
+
+BREAKING CHANGE: l'interface passe de Tkinter a PySide6, executer
+pip install -r requirements.txt. Les doublons ignores sont desormais
+memorises par paire de chemins (les anciennes entrees restent honorees).
