@@ -31,6 +31,13 @@ DEFAULT_CAMERA_PATH = r"P:\AutoUpload\Xiaomi 2407FPN8EG\DCIM\Camera"
 # Deduced from the Camera folder when left empty (Camera -> DCIM -> root).
 DEFAULT_PCLOUD_ROOT = ""
 
+# Scopes the duplicate tab can scan
+DUP_SCOPES = [
+    ("📷 Camera", ''),
+    ("🖼️ Screenshots", '!Screenshots_'),
+    ("🎬 ScreenRecorder", '!ScreenRecorder_'),
+]
+
 # Sources the sorting tab can work on: label -> prefix of the year sub-folder
 # ('' = loose files at the root of Camera)
 SORT_SOURCES = [
@@ -330,6 +337,20 @@ APP_NAMES = {
     'com.duolingo': 'Duolingo',
     'com.strava': 'Strava',
     'com.valvesoftware.android.steam.community': 'Steam',
+    'com.openai.chatgpt': 'ChatGPT',
+    'com.xiaomi.smarthome': 'Xiaomi Home',
+    'com.stt.android.suunto': 'Suunto',
+    'com.lonelycatgames.xplore': 'X-plore',
+    'com.auchan.android': 'Auchan',
+    'com.lidl.eci.lidlplus': 'Lidl Plus',
+    'yqtrack.app': '17TRACK',
+    'com.textra': 'Textra',
+    'com.mi.globalbrowser': 'Mi Browser',
+    'com.miui.securitycenter': 'Sécurité',
+    'com.miui.calculator': 'Calculatrice',
+    'com.android.incallui': 'Téléphone',
+    'fr.geev.application': 'Geev',
+    'com.mxtech.videoplayer.ad': 'MX Player',
     'com.miui.gallery': 'Galerie',
     'com.miui.home': 'Écran d\'accueil',
     'com.android.camera': 'Appareil photo',
@@ -337,31 +358,51 @@ APP_NAMES = {
 
 APP_NAMES_LOWER = {k.lower(): v for k, v in APP_NAMES.items()}
 
+# Screenshots that carry a tag instead of a package
+SPECIAL_TAGS = {
+    'lockscreen': 'Écran de verrouillage',
+    'launcher': 'Écran d\'accueil',
+    'home': 'Écran d\'accueil',
+    'systemui': 'Système',
+    'recents': 'Applis récentes',
+}
+
 # Segments that say nothing about the app: keep looking to their left
 GENERIC_SEGMENTS = {'android', 'app', 'apps', 'mobile', 'main', 'client', 'shopping',
                     'browser', 'messenger', 'music', 'video', 'free', 'pro', 'lite',
                     'release', 'prod', 'ui', 'go'}
 
+# Suffixes the phone appends after the package: -edit, -edit1, -crop...
+EDIT_SUFFIX_RE = re.compile(r'-(edit|crop|copy|copie|mark)\d*$', re.IGNORECASE)
+
 
 def app_from_filename(filename):
     """Readable app name from an Android screenshot filename, or None.
 
-    'Screenshot_2026-04-17-12-43-54-918_com.whatsapp.jpg' -> 'WhatsApp'
-    'Screenshot_..._com.tutteo.flat.jpg'                  -> 'Flat'
+    'Screenshot_..._com.whatsapp.jpg'       -> 'WhatsApp'
+    'Screenshot_..._com.whatsapp-edit.jpg'  -> 'WhatsApp'   (retouchée sur le tél.)
+    'Screenshot_..._lockscreen.jpg'         -> 'Écran de verrouillage'
+    'Screenshot_..._com.tutteo.flat_1.jpg'  -> 'Flat'       (copie _1)
+    'IMG_20230829_190623.jpg'               -> None
     """
     stem = os.path.splitext(filename)[0]
-    m = re.search(r'_((?:[A-Za-z][\w]*\.){1,6}[A-Za-z][\w]*)$', stem)
-    if not m:
+    # A '_1' collision suffix must not be mistaken for the app segment
+    stem = re.sub(r'_\d{1,2}$', '', stem)
+    if '_' not in stem:
         return None
-    package = m.group(1)
+    tail = EDIT_SUFFIX_RE.sub('', stem.rsplit('_', 1)[1])
+    if not tail or not re.match(r'^[A-Za-z]', tail):
+        return None                                  # digits = a date, not an app
+    if '.' not in tail:                              # 'lockscreen', 'launcher'...
+        return SPECIAL_TAGS.get(tail.lower()) or (tail[:1].upper() + tail[1:])
+    package = tail
     known = APP_NAMES_LOWER.get(package.lower())
     if known:
         return known
     parts = [p for p in package.split('.') if p]
     if len(parts) < 2:
         return None
-    # Drop the TLD-ish prefix (com, org, net, fr, io, app, we...)
-    body = parts[1:] if len(parts) > 2 else parts[1:]
+    body = parts[1:]                                 # drop com / org / fr / app...
     for segment in reversed(body):
         if segment.lower() not in GENERIC_SEGMENTS and not segment.isdigit():
             return segment[:1].upper() + segment[1:]
@@ -1420,6 +1461,7 @@ class TriPhotoWindow(QMainWindow):
         self.current_screenshots = []
         self.files_by_uid = {}     # uid -> entry of self.files (see fill_file_table)
         self.sort_source_index = 0   # 0 = Camera, 1 = Screenshots, 2 = ScreenRecorder
+        self.dup_scope_index = 0     # même découpage pour l'onglet Doublons
         self.dup_temp_files = []
         self.current_dup_row = None
         # Video slideshow state (duplicates tab)
@@ -1802,6 +1844,23 @@ class TriPhotoWindow(QMainWindow):
         info.setTextFormat(Qt.TextFormat.RichText)
         info.setWordWrap(True)
         layout.addWidget(info)
+
+        scope_bar = QHBoxLayout()
+        scope_bar.addWidget(QLabel("🔎 Périmètre :"))
+        self.dup_scope_group = QButtonGroup(self)
+        self.dup_scope_group.setExclusive(True)
+        for i, (label, prefix) in enumerate(DUP_SCOPES):
+            rb = QRadioButton(label)
+            rb.setToolTip("Dossiers d'événements + viviers de captures" if not prefix
+                          else f"Uniquement les dossiers {prefix}ANNÉE")
+            if i == 0:
+                rb.setChecked(True)
+            self.dup_scope_group.addButton(rb, i)
+            scope_bar.addWidget(rb)
+        scope_bar.addStretch(1)
+        self.dup_scope_group.idToggled.connect(
+            lambda idx, checked: checked and self.on_dup_scope_changed(idx))
+        layout.addLayout(scope_bar)
 
         btns = QHBoxLayout()
         b_scan = QPushButton("🔍 Scanner")
@@ -2346,37 +2405,30 @@ class TriPhotoWindow(QMainWindow):
         organized_folders = set()
         suffix_dupes = []  # (copy_filename, copy_path, original_path, same_size)
 
-        for item in os.listdir(base):
-            item_path = os.path.join(base, item)
-            if not os.path.isdir(item_path) or not re.match(r'^\d{4}$', item):
-                continue
-            for folder in os.listdir(item_path):
-                folder_path = os.path.join(item_path, folder)
-                if not os.path.isdir(folder_path):
+        for folder_path, is_screenshot in self.dup_scan_folders():
+            if is_screenshot:
+                screenshot_folders.add(folder_path)
+            else:
+                organized_folders.add(folder_path)
+            local = {}
+            try:
+                for filename in os.listdir(folder_path):
+                    filepath = os.path.join(folder_path, filename)
+                    if os.path.isfile(filepath):
+                        file_index.setdefault(filename, []).append(filepath)
+                        local[filename] = filepath
+            except Exception as e:
+                log(f"❌ Error scanning {folder_path}: {e}")
+            # Same-folder copies: 'x_1.ext', 'x (1).ext', 'x - Copie.ext'... next to 'x.ext'
+            for filename, filepath in local.items():
+                original = copy_original_name(filename)
+                if not original or original not in local:
                     continue
-                if folder.startswith('!Screenshot') or folder.startswith('!ScreenRecorder'):
-                    screenshot_folders.add(folder_path)
-                elif not folder.startswith('!'):
-                    organized_folders.add(folder_path)
-                local = {}
                 try:
-                    for filename in os.listdir(folder_path):
-                        filepath = os.path.join(folder_path, filename)
-                        if os.path.isfile(filepath):
-                            file_index.setdefault(filename, []).append(filepath)
-                            local[filename] = filepath
-                except Exception as e:
-                    log(f"❌ Error scanning {folder_path}: {e}")
-                # Same-folder copies: 'x_1.ext', 'x (1).ext', 'x - Copie.ext'... next to 'x.ext'
-                for filename, filepath in local.items():
-                    original = copy_original_name(filename)
-                    if not original or original not in local:
-                        continue
-                    try:
-                        same_size = os.path.getsize(filepath) == os.path.getsize(local[original])
-                    except OSError:
-                        continue
-                    suffix_dupes.append((filename, filepath, local[original], same_size))
+                    same_size = os.path.getsize(filepath) == os.path.getsize(local[original])
+                except OSError:
+                    continue
+                suffix_dupes.append((filename, filepath, local[original], same_size))
 
         auto_count = conflict_count = 0
         for filename, paths in sorted(file_index.items()):
@@ -2421,6 +2473,49 @@ class TriPhotoWindow(QMainWindow):
             f"{conflict_count} conflicts, {copy_doubt_count} copies with a different size")
         # Score everything in the background: the column fills itself while you work
         self.start_background_compare()
+
+    def dup_scope_prefix(self):
+        index = getattr(self, 'dup_scope_index', 0)
+        return DUP_SCOPES[index][1] if 0 <= index < len(DUP_SCOPES) else ''
+
+    def dup_scan_folders(self):
+        """(folder, is_screenshot_folder) pairs to index, per selected scope.
+
+        Camera        : event folders of every year, plus the !Screenshots_ /
+                        !ScreenRecorder_ buckets and their app sub-folders, so a
+                        capture filed into an event folder is seen as a duplicate
+                        of the one still sitting in the bucket.
+        Screenshots   : only the !Screenshots_YEAR trees, sub-folders included
+        ScreenRecorder: idem with !ScreenRecorder_YEAR
+        """
+        base = self.base_path
+        prefix = self.dup_scope_prefix()
+        for year in sorted(os.listdir(base)):
+            year_dir = os.path.join(base, year)
+            if not os.path.isdir(year_dir) or not re.match(r'^\d{4}$', year):
+                continue
+            if prefix:
+                bucket = os.path.join(year_dir, f"{prefix}{year}")
+                if os.path.isdir(bucket):
+                    for current, _dirs, _files in os.walk(bucket):
+                        yield current, False        # all equal: any dupe is a conflict
+                continue
+            for folder in sorted(os.listdir(year_dir)):
+                folder_path = os.path.join(year_dir, folder)
+                if not os.path.isdir(folder_path):
+                    continue
+                if folder.startswith('!Screenshot') or folder.startswith('!ScreenRecorder'):
+                    for current, _dirs, _files in os.walk(folder_path):
+                        yield current, True
+                elif not folder.startswith('!'):
+                    yield folder_path, False
+
+    def on_dup_scope_changed(self, index):
+        if index == getattr(self, 'dup_scope_index', 0):
+            return
+        self.dup_scope_index = index
+        log(f"[DUP] Périmètre: {DUP_SCOPES[index][0]}")
+        self.scan_duplicates()
 
     def add_dup_row(self, filename, kind, paths1, paths2, color):
         base = self.base_path
@@ -2688,6 +2783,10 @@ class TriPhotoWindow(QMainWindow):
         vb = QHBoxLayout(self.video_bar)
         vb.setContentsMargins(0, 6, 0, 0)
         vb.setSpacing(10)
+        b_play = QPushButton("▶️ Lire la vidéo")
+        b_play.clicked.connect(self.play_current_video)
+        vb.addWidget(b_play)
+        vb.addSpacing(12)
         vb.addWidget(QLabel("🎬 Position :"))
         self.video_buttons = []
         self.video_group = QButtonGroup(self)
@@ -2701,17 +2800,35 @@ class TriPhotoWindow(QMainWindow):
             vb.addWidget(b)
             self.video_buttons.append(b)
         vb.addStretch(1)
-        b_play = QPushButton("▶️ Lire la vidéo")
-        b_play.clicked.connect(self.play_current_video)
-        vb.addWidget(b_play)
-        self.video_bar.setVisible(False)
-        rv.addWidget(self.video_bar)
+        self.video_bar.setVisible(True)
+        # Eleven labelled radios are wide: inside a scroll area they no longer impose
+        # a minimum width on the whole panel, so the splitter stays free to move.
+        self.video_scroll = QScrollArea()
+        self.video_scroll.setWidget(self.video_bar)
+        self.video_scroll.setWidgetResizable(True)
+        self.video_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.video_scroll.setFixedHeight(self.video_bar.sizeHint().height() + 14)
+        self.video_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.video_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.video_scroll.setVisible(False)
+        rv.addWidget(self.video_scroll)
 
         self.file_label = QLabel("")
         self.file_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.file_label.setWordWrap(True)
         rv.addWidget(self.file_label)
         splitter.addWidget(right)
 
+        # Nothing may refuse to shrink, otherwise the handles look stuck
+        for panel, minimum in ((left, 220), (mid, 150), (right, 200)):
+            panel.setMinimumWidth(minimum)
+        self.file_table.setMinimumWidth(180)
+        self.folder_list.setMinimumWidth(120)
+        self.viewer_scroll.setMinimumWidth(120)
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(8)
         splitter.setSizes([560, 260, 640])
 
         # Action buttons
@@ -2798,6 +2915,10 @@ class TriPhotoWindow(QMainWindow):
                   activated=self.viewer_rename, context=Qt.ShortcutContext.WidgetShortcut)
         rv.addWidget(self.viewer_grid, stretch=1)
         splitter.addWidget(right)
+        for panel, minimum in ((left, 110), (mid, 150), (right, 220)):
+            panel.setMinimumWidth(minimum)
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(8)
         splitter.setSizes([150, 280, 900])
 
         # Bottom: chronological timeline
@@ -3467,6 +3588,7 @@ class TriPhotoWindow(QMainWindow):
             return
         base = self.base_path
         plan = []                       # (path, target folder, app)
+        seen = 0
         for year in sorted(os.listdir(base)):
             bucket = os.path.join(base, year, f"{prefix}{year}")
             if not re.match(r'^\d{4}$', year) or not os.path.isdir(bucket):
@@ -3477,11 +3599,15 @@ class TriPhotoWindow(QMainWindow):
                     continue
                 if os.path.splitext(name)[1].lower() not in (IMAGE_EXTS | VIDEO_EXTS):
                     continue
+                seen += 1
                 app = app_from_filename(name)
                 if app:
                     plan.append((path, os.path.join(bucket, app), app))
         if not plan:
-            self.statusBar().showMessage("Aucune capture à regrouper (nom d'appli absent)")
+            self.statusBar().showMessage(
+                f"Aucune appli reconnue sur les {seen} fichier(s) à la racine des viviers"
+                if seen else "Les viviers sont vides à la racine : rien à regrouper")
+            log(f"[APPS] {seen} fichier(s) examiné(s), aucun nom d'application reconnu")
             return
         apps = sorted({app for _p, _t, app in plan})
         if QMessageBox.question(
@@ -3664,6 +3790,7 @@ class TriPhotoWindow(QMainWindow):
         Duplicates (same name, same size) go to !duplicate, never overwritten."""
         root = self.pcloud_root()
         base = self.base_path
+        self._camera_index = None          # rebuilt for this run
         log("=" * 62)
         log(f"[PCLOUD] Racine  : {root}")
         log(f"[PCLOUD] Camera  : {base}")
@@ -3699,7 +3826,7 @@ class TriPhotoWindow(QMainWindow):
                 m, s_, e = self.move_media_files(
                     folder,
                     lambda year, k=kind: os.path.join(base, year, f"!{k}_{year}"),
-                    entry, recursive=True, by_app=True)
+                    entry, recursive=True, by_app=True, guard_tree=True)
                 moved += m
                 skipped += s_
                 errors += e
@@ -3717,8 +3844,36 @@ class TriPhotoWindow(QMainWindow):
                 + (f", {errors} erreur(s)" if errors else ""))
         return moved
 
+    def camera_index(self):
+        """{nom en minuscules: [(chemin, taille)]} pour tout Camera SAUF les dossiers
+        techniques. Construit une seule fois par import."""
+        if getattr(self, '_camera_index', None) is not None:
+            return self._camera_index
+        index = {}
+        base = self.base_path
+        for current, dirs, files in os.walk(base):
+            dirs[:] = [d for d in dirs
+                       if d not in ('!duplicate', '!temp', '!tempvideoscreen')]
+            for name in files:
+                path = os.path.join(current, name)
+                try:
+                    size = os.path.getsize(path)
+                except OSError:
+                    continue
+                index.setdefault(name.lower(), []).append((path, size))
+        self._camera_index = index
+        log(f"[PCLOUD] Index Camera: {len(index)} nom(s) de fichier connus")
+        return index
+
+    def existing_copy(self, filename, size):
+        """Chemin d'une copie deja rangee ailleurs (meme nom, meme taille), ou None"""
+        for path, existing_size in self.camera_index().get(filename.lower(), []):
+            if existing_size == size:
+                return path
+        return None
+
     def move_media_files(self, source, target_for_year, label, recursive=False,
-                         by_app=False):
+                         by_app=False, guard_tree=False):
         """Move every media of `source` to target_for_year(year).
         recursive=False -> root files only (Pictures: its folders stay untouched).
         Returns (moved, skipped, errors)."""
@@ -3735,7 +3890,7 @@ class TriPhotoWindow(QMainWindow):
                 if recursive and not name.startswith('!'):
                     m, s_, e = self.move_media_files(path, target_for_year,
                                                      f"{label}\\{name}", recursive=True,
-                                                     by_app=by_app)
+                                                     by_app=by_app, guard_tree=guard_tree)
                     moved += m
                     skipped += s_
                     errors += e
@@ -3750,6 +3905,25 @@ class TriPhotoWindow(QMainWindow):
                 log(f"[PCLOUD]    ⚠️ année inconnue, laissé sur place: {label}\\{name}")
                 skipped += 1
                 continue
+            # A copy already filed somewhere in Camera (a screenshot you sorted into
+            # an event folder) must never be shadowed by a second one.
+            if guard_tree:
+                try:
+                    size = os.path.getsize(path)
+                except OSError:
+                    size = -1
+                known = self.existing_copy(name, size)
+                if known:
+                    try:
+                        safe_move(path, dup_dir)
+                        log(f"[PCLOUD]    ♻️ déjà rangé en "
+                            f"{os.path.relpath(known, self.base_path)}"
+                            f" -> !duplicate: {label}\\{name}")
+                        moved += 1
+                    except Exception as e:
+                        log(f"[PCLOUD]    ❌ {label}\\{name}: {e}")
+                        errors += 1
+                    continue
             target = target_for_year(year)
             if by_app:
                 # Screenshots carry the app package: group them by app
@@ -3758,6 +3932,13 @@ class TriPhotoWindow(QMainWindow):
                     target = os.path.join(target, app)
             try:
                 dest = safe_move(path, target, dup_dir=dup_dir)
+                if guard_tree:
+                    try:
+                        self.camera_index().setdefault(
+                            os.path.basename(dest).lower(), []).append(
+                                (dest, os.path.getsize(dest)))
+                    except OSError:
+                        pass
                 where = os.path.relpath(dest, self.base_path)
                 if os.path.normcase(os.path.dirname(dest)) == os.path.normcase(dup_dir):
                     log(f"[PCLOUD]    ♻️ doublon -> !duplicate: {label}\\{name}")
@@ -3826,10 +4007,10 @@ class TriPhotoWindow(QMainWindow):
         self.current_filepath = path
         self.file_label.setText(info['filename'])
         self.zoom = 1.0
-        self.video_bar.setVisible(False)
+        self.video_scroll.setVisible(False)
 
         if info['ext'] in VIDEO_EXTS:
-            self.video_bar.setVisible(True)
+            self.video_scroll.setVisible(True)
             try:
                 default_index = VIDEO_PERCENTS.index(DEFAULT_SHOT_PCT)
             except ValueError:
