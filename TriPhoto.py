@@ -27,6 +27,28 @@ EXCLUSION_FILE = os.path.join(SCRIPT_DIR, 'FolderDoublonExclusion.txt')
 
 DEFAULT_CAMERA_PATH = r"P:\AutoUpload\Xiaomi 2407FPN8EG\DCIM\Camera"
 
+# pCloud sync root: the folder that holds DCIM/ and Pictures/.
+# Deduced from the Camera folder when left empty (Camera -> DCIM -> root).
+DEFAULT_PCLOUD_ROOT = ""
+
+# Sources the sorting tab can work on: label -> prefix of the year sub-folder
+# ('' = loose files at the root of Camera)
+SORT_SOURCES = [
+    ("📷 Camera", ''),
+    ("🖼️ Screenshots", '!Screenshots_'),
+    ("🎬 ScreenRecorder", '!ScreenRecorder_'),
+]
+
+# Sub-folders of DCIM emptied into Camera\YEAR\!<name>_YEAR
+DCIM_SPECIAL_FOLDERS = {
+    'Screenshots': 'Screenshots',
+    'Screenshot': 'Screenshots',
+    'ScreenRecorder': 'ScreenRecorder',
+    'Screenrecorder': 'ScreenRecorder',
+    'Screen Recorder': 'ScreenRecorder',
+    'ScreenRecords': 'ScreenRecorder',
+}
+
 IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.heic', '.heif'}
 VIDEO_EXTS = {'.mp4', '.avi', '.mov', '.wmv', '.flv', '.mkv', '.m4v', '.3gp', '.webm', '.mts'}
 VIDEO_PERCENTS = [0, 10, 15, 25, 30, 50, 65, 75, 85, 95, 100]
@@ -259,10 +281,102 @@ def get_year_from_file(filename, filepath):
         return None
 
 
+# Android screenshots end with the package of the app: Screenshot_..._com.whatsapp.jpg
+APP_NAMES = {
+    'com.whatsapp': 'WhatsApp',
+    'com.whatsapp.w4b': 'WhatsApp Business',
+    'com.facebook.katana': 'Facebook',
+    'com.facebook.orca': 'Messenger',
+    'com.instagram.android': 'Instagram',
+    'com.google.android.gm': 'Gmail',
+    'com.google.android.youtube': 'YouTube',
+    'com.google.android.apps.maps': 'Google Maps',
+    'com.google.android.apps.photos': 'Google Photos',
+    'com.google.android.calendar': 'Google Agenda',
+    'com.google.android.googlequicksearchbox': 'Google',
+    'com.android.vending': 'Play Store',
+    'com.android.chrome': 'Chrome',
+    'com.android.settings': 'Paramètres',
+    'com.android.systemui': 'Système',
+    'com.brave.browser': 'Brave',
+    'org.mozilla.firefox': 'Firefox',
+    'com.amazon.mShop.android.shopping': 'Amazon',
+    'com.alibaba.aliexpresshd': 'AliExpress',
+    'com.einnovation.temu': 'Temu',
+    'fr.leboncoin': 'Leboncoin',
+    'com.vinted': 'Vinted',
+    'org.telegram.messenger': 'Telegram',
+    'org.thoughtcrime.securesms': 'Signal',
+    'com.discord': 'Discord',
+    'com.reddit.frontpage': 'Reddit',
+    'com.twitter.android': 'X',
+    'com.zhiliaoapp.musically': 'TikTok',
+    'com.linkedin.android': 'LinkedIn',
+    'com.snapchat.android': 'Snapchat',
+    'com.spotify.music': 'Spotify',
+    'com.netflix.mediaclient': 'Netflix',
+    'tv.twitch.android.app': 'Twitch',
+    'deezer.android.app': 'Deezer',
+    'com.microsoft.teams': 'Teams',
+    'com.microsoft.office.outlook': 'Outlook',
+    'com.waze': 'Waze',
+    'com.booking': 'Booking',
+    'com.airbnb.android': 'Airbnb',
+    'com.ubercab': 'Uber',
+    'com.paypal.android.p2pmobile': 'PayPal',
+    'com.revolut.revolut': 'Revolut',
+    'fr.doctolib.www': 'Doctolib',
+    'com.vsct.vsc.mobile.horaireetresa.android': 'SNCF Connect',
+    'com.duolingo': 'Duolingo',
+    'com.strava': 'Strava',
+    'com.valvesoftware.android.steam.community': 'Steam',
+    'com.miui.gallery': 'Galerie',
+    'com.miui.home': 'Écran d\'accueil',
+    'com.android.camera': 'Appareil photo',
+}
+
+APP_NAMES_LOWER = {k.lower(): v for k, v in APP_NAMES.items()}
+
+# Segments that say nothing about the app: keep looking to their left
+GENERIC_SEGMENTS = {'android', 'app', 'apps', 'mobile', 'main', 'client', 'shopping',
+                    'browser', 'messenger', 'music', 'video', 'free', 'pro', 'lite',
+                    'release', 'prod', 'ui', 'go'}
+
+
+def app_from_filename(filename):
+    """Readable app name from an Android screenshot filename, or None.
+
+    'Screenshot_2026-04-17-12-43-54-918_com.whatsapp.jpg' -> 'WhatsApp'
+    'Screenshot_..._com.tutteo.flat.jpg'                  -> 'Flat'
+    """
+    stem = os.path.splitext(filename)[0]
+    m = re.search(r'_((?:[A-Za-z][\w]*\.){1,6}[A-Za-z][\w]*)$', stem)
+    if not m:
+        return None
+    package = m.group(1)
+    known = APP_NAMES_LOWER.get(package.lower())
+    if known:
+        return known
+    parts = [p for p in package.split('.') if p]
+    if len(parts) < 2:
+        return None
+    # Drop the TLD-ish prefix (com, org, net, fr, io, app, we...)
+    body = parts[1:] if len(parts) > 2 else parts[1:]
+    for segment in reversed(body):
+        if segment.lower() not in GENERIC_SEGMENTS and not segment.isdigit():
+            return segment[:1].upper() + segment[1:]
+    return body[-1][:1].upper() + body[-1][1:] if body else None
+
+
 def safe_move(src, target_folder, dup_dir=None):
     """Move file to folder with collision handling.
     If an identical file (same name + same size) already exists at destination
     and dup_dir is given, src goes to dup_dir instead (never duplicated with _1/_2)."""
+    # A file already in the target folder has nothing to do: without this guard it
+    # would collide with ITSELF and be sent to dup_dir.
+    if os.path.normcase(os.path.abspath(os.path.dirname(src))) == \
+            os.path.normcase(os.path.abspath(target_folder)):
+        return src
     os.makedirs(target_folder, exist_ok=True)
     filename = os.path.basename(src)
     dest = os.path.join(target_folder, filename)
@@ -1287,14 +1401,25 @@ class TriPhotoWindow(QMainWindow):
         self.ignore_list = set(load_json(IGNORE_FILE, []))
         # ffmpeg: config folder wins, else the default install, else PATH
         self.ffmpeg_dir = self.config.get('ffmpeg_dir', DEFAULT_FFMPEG_DIR)
+        changed = False
         if self.config.get('ffmpeg_dir') != self.ffmpeg_dir:
             self.config['ffmpeg_dir'] = self.ffmpeg_dir
+            changed = True
+        # pCloud sync root (holds DCIM/ and Pictures/); empty = deduced from Camera
+        if 'pcloud_root' not in self.config:
+            self.config['pcloud_root'] = DEFAULT_PCLOUD_ROOT
+            changed = True
+        if 'pcloud_autoimport' not in self.config:
+            self.config['pcloud_autoimport'] = True
+            changed = True
+        if changed:
             save_json(CONFIG_FILE, self.config)
         resolve_ffmpeg(self.ffmpeg_dir)
         self.files = []            # list of dicts: filename, filepath, ext, datetime, year, folder
         self.dup_moves = {}        # {filename: [paths to move]}
         self.current_screenshots = []
         self.files_by_uid = {}     # uid -> entry of self.files (see fill_file_table)
+        self.sort_source_index = 0   # 0 = Camera, 1 = Screenshots, 2 = ScreenRecorder
         self.dup_temp_files = []
         self.current_dup_row = None
         # Video slideshow state (duplicates tab)
@@ -1377,6 +1502,29 @@ class TriPhotoWindow(QMainWindow):
         btn_scan.clicked.connect(self.startup_load)
         top.addWidget(btn_scan)
         root_layout.addLayout(top)
+
+        # Second line: pCloud sync folder
+        sync = QHBoxLayout()
+        sync.addWidget(QLabel("☁️ Dossier pCloud :"))
+        self.pcloud_edit = QLineEdit(self.pcloud_root())
+        self.pcloud_edit.setToolTip("Dossier contenant DCIM\\ et Pictures\\.\n"
+                                    "Vide = déduit du dossier Camera.")
+        self.pcloud_edit.editingFinished.connect(self.on_pcloud_edited)
+        sync.addWidget(self.pcloud_edit, stretch=1)
+        btn_pcloud = QPushButton("Parcourir…")
+        btn_pcloud.clicked.connect(self.browse_pcloud)
+        sync.addWidget(btn_pcloud)
+        self.autoimport_check = QCheckBox("Importer à l'ouverture")
+        self.autoimport_check.setChecked(bool(self.config.get('pcloud_autoimport', True)))
+        self.autoimport_check.setToolTip(
+            "Vide Pictures\\ et DCIM\\Screenshots / ScreenRecorder dans Camera\\ "
+            "à chaque lancement.")
+        self.autoimport_check.toggled.connect(self.on_autoimport_toggled)
+        sync.addWidget(self.autoimport_check)
+        btn_import = QPushButton("📥 Importer maintenant")
+        btn_import.clicked.connect(self.import_pcloud_now)
+        sync.addWidget(btn_import)
+        root_layout.addLayout(sync)
 
         # Tabs
         self.tabs = QTabWidget()
@@ -2465,6 +2613,24 @@ class TriPhotoWindow(QMainWindow):
         left = QWidget()
         lv = QVBoxLayout(left)
         lv.setContentsMargins(0, 0, 0, 0)
+        # Which pool of files we are sorting
+        source_bar = QHBoxLayout()
+        source_bar.setContentsMargins(0, 0, 0, 0)
+        source_bar.addWidget(QLabel("📂 Source :"))
+        self.source_group = QButtonGroup(self)
+        self.source_group.setExclusive(True)
+        for i, (label, prefix) in enumerate(SORT_SOURCES):
+            rb = QRadioButton(label)
+            rb.setToolTip("Fichiers en vrac à la racine de Camera" if not prefix
+                          else f"Médias parqués dans les dossiers {prefix}ANNÉE")
+            if i == 0:
+                rb.setChecked(True)
+            self.source_group.addButton(rb, i)
+            source_bar.addWidget(rb)
+        source_bar.addStretch(1)
+        self.source_group.idToggled.connect(
+            lambda idx, checked: checked and self.on_sort_source_changed(idx))
+        lv.addLayout(source_bar)
         lv.addWidget(QLabel("📋 Fichiers à trier (double-clic sur l'année pour corriger)"))
         self.file_table = QTableWidget(0, 4)
         self.file_table.setHorizontalHeaderLabels(
@@ -2559,6 +2725,11 @@ class TriPhotoWindow(QMainWindow):
         b_delete = QPushButton("🗑️ Supprimer (corbeille)")
         b_delete.clicked.connect(self.delete_selected)
         actions.addWidget(b_delete)
+        b_apps = QPushButton("🗂️ Ranger par appli")
+        b_apps.setToolTip("Range les captures d'écran de la source affichée dans des\n"
+                          "sous-dossiers portant le nom de l'application (WhatsApp, Brave…).")
+        b_apps.clicked.connect(self.sort_by_app)
+        actions.addWidget(b_apps)
         b_reset = QPushButton("❌ Recharger")
         b_reset.clicked.connect(self.scan_media)
         actions.addWidget(b_reset)
@@ -2924,6 +3095,11 @@ class TriPhotoWindow(QMainWindow):
             return
         self.video_cache_dir = os.path.join(base, '!tempvideoscreen')
         self.purge_video_cache()
+        if self.config.get('pcloud_autoimport', True):
+            try:
+                self.import_pcloud(silent=True)     # before the scans read the folders
+            except Exception as e:
+                log(f"[PCLOUD] ❌ Import: {e}")
         try:
             self.analyze_renames()
         except Exception as e:
@@ -2940,30 +3116,70 @@ class TriPhotoWindow(QMainWindow):
 
         edits = load_json(EDITS_FILE, {})
         self.files = []
-        for filename in sorted(os.listdir(base)):
-            filepath = os.path.join(base, filename)
-            if os.path.isdir(filepath):
-                continue
+        prefix = self.sort_prefix()
+        for filename, filepath, forced_year, here in self.iter_source_files(prefix):
             ext = os.path.splitext(filename)[1].lower()
             if ext not in (IMAGE_EXTS | VIDEO_EXTS):
                 continue
-            m = re.search(r'(20\d{2})', filename)
-            if m:
-                year = m.group(1)
-            else:
-                year = get_year_from_file(filename, filepath) or ''
-                if year:
-                    log(f"[SCAN] Year from EXIF/date for {filename}: {year}")
+            year = forced_year
+            if not year:
+                m = re.search(r'(20\d{2})', filename)
+                if m:
+                    year = m.group(1)
+                else:
+                    year = get_year_from_file(filename, filepath) or ''
+                    if year:
+                        log(f"[SCAN] Year from EXIF/date for {filename}: {year}")
             dt = file_datetime(filename, filepath)
             self.files.append({
                 'filename': filename, 'filepath': filepath, 'ext': ext,
-                'datetime': dt, 'year': year, 'folder': edits.get(filename, '')
+                'datetime': dt, 'year': year,
+                # 'here' = sub-folder it already sits in, shown as its current folder
+                'folder': edits.get(filename, here)
             })
         # Chronological, photos and videos mixed together
         self.files.sort(key=lambda x: (x['datetime'] or datetime.min, x['filename']))
         log(f"[SCAN] Files to organize: {len(self.files)}")
         self.fill_file_table()
         self.statusBar().showMessage(f"🔄 {len(self.files)} fichier(s) à trier")
+
+    def sort_prefix(self):
+        """Prefix of the year sub-folder currently being sorted ('' = Camera root)"""
+        index = getattr(self, 'sort_source_index', 0)
+        return SORT_SOURCES[index][1] if 0 <= index < len(SORT_SOURCES) else ''
+
+    def iter_source_files(self, prefix):
+        """Yield (filename, filepath, year, current_subfolder) for the chosen source.
+
+        prefix == ''  -> loose files at the root of Camera, year unknown
+        otherwise     -> everything under Camera\\YEAR\\<prefix>YEAR\\, including its
+                         sub-folders; the year comes from the folder it sits in."""
+        base = self.base_path
+        if not prefix:
+            for filename in sorted(os.listdir(base)):
+                path = os.path.join(base, filename)
+                if not os.path.isdir(path):
+                    yield filename, path, '', ''
+            return
+        for year in sorted(os.listdir(base)):
+            year_dir = os.path.join(base, year)
+            if not os.path.isdir(year_dir) or not re.match(r'^\d{4}$', year):
+                continue
+            bucket = os.path.join(year_dir, f"{prefix}{year}")
+            if not os.path.isdir(bucket):
+                continue
+            for current, _dirs, files in os.walk(bucket):
+                rel = os.path.relpath(current, year_dir)
+                for filename in sorted(files):
+                    # 'rel' is relative to the year, so it can be reused as a folder value
+                    yield filename, os.path.join(current, filename), year, rel
+
+    def on_sort_source_changed(self, index):
+        if index == getattr(self, 'sort_source_index', 0):
+            return
+        self.sort_source_index = index
+        log(f"[SCAN] Source de tri: {SORT_SOURCES[index][0]}")
+        self.scan_media()
 
     def fill_file_table(self):
         self._filling = True
@@ -3083,11 +3299,25 @@ class TriPhotoWindow(QMainWindow):
         year_folder = os.path.join(self.base_path, year)
         if not os.path.isdir(year_folder):
             return
-        folders = [f for f in sorted(os.listdir(year_folder))
+        # Normal event folders of the year
+        entries = [(f, f) for f in sorted(os.listdir(year_folder))
                    if os.path.isdir(os.path.join(year_folder, f)) and not f.startswith('!')]
-        for folder in folders:
-            it = QListWidgetItem(folder)
-            it.setBackground(folder_color(folder))
+        # Plus the sub-folders living inside the bucket being sorted, so a screenshot
+        # can stay among screenshots or move out to a real event folder
+        prefix = self.sort_prefix()
+        if prefix:
+            bucket = os.path.join(year_folder, f"{prefix}{year}")
+            if os.path.isdir(bucket):
+                for sub in sorted(os.listdir(bucket)):
+                    if os.path.isdir(os.path.join(bucket, sub)) and not sub.startswith('!'):
+                        entries.append((os.path.join(f"{prefix}{year}", sub),
+                                        f"↳ {sub}"))
+                entries.insert(0, (f"{prefix}{year}", f"↳ (racine {prefix}{year})"))
+        for value, label in entries:
+            it = QListWidgetItem(label)
+            it.setData(Qt.ItemDataRole.UserRole, value)     # str: safe through Qt
+            it.setBackground(folder_color(value))
+            it.setToolTip(f"{year}\\{value}")
             self.folder_list.addItem(it)
 
     def current_year(self):
@@ -3152,13 +3382,25 @@ class TriPhotoWindow(QMainWindow):
                                      + (f" ({moved} fichier(s) suivis)" if moved else ""))
 
     def on_folder_clicked(self, list_item):
-        folder = list_item.text()
+        folder = list_item.data(Qt.ItemDataRole.UserRole) or list_item.text()
         rows = sorted({idx.row() for idx in self.file_table.selectedIndexes()})
         if not rows:
             self.statusBar().showMessage("Sélectionne d'abord des fichiers")
             return
         self.assign_folder_to_rows(rows, folder)
         self.statusBar().showMessage(f"📁 {len(rows)} fichier(s) → {folder}")
+        self.select_next_file(rows[-1])
+
+    def select_next_file(self, after_row):
+        """Assigning is the last thing you do on a file: move on to the next one"""
+        nxt = after_row + 1
+        if nxt >= self.file_table.rowCount():
+            return
+        self.file_table.clearSelection()
+        self.file_table.setCurrentCell(nxt, 0)
+        self.file_table.scrollToItem(self.file_table.item(nxt, 0),
+                                     QAbstractItemView.ScrollHint.EnsureVisible)
+        self.file_table.setFocus()
 
     def assign_folder_to_rows(self, rows, folder):
         """Assign in one repaint instead of one per cell, and save on a timer:
@@ -3216,6 +3458,57 @@ class TriPhotoWindow(QMainWindow):
         self.new_folder_edit.clear()
         self.statusBar().showMessage(f"✨ Créé et assigné à {len(rows)} fichier(s) : {name}")
 
+    def sort_by_app(self):
+        """Move the screenshots sitting loose in the buckets into per-app folders"""
+        prefix = self.sort_prefix()
+        if not prefix:
+            self.statusBar().showMessage(
+                "Choisis la source Screenshots ou ScreenRecorder d'abord")
+            return
+        base = self.base_path
+        plan = []                       # (path, target folder, app)
+        for year in sorted(os.listdir(base)):
+            bucket = os.path.join(base, year, f"{prefix}{year}")
+            if not re.match(r'^\d{4}$', year) or not os.path.isdir(bucket):
+                continue
+            for name in sorted(os.listdir(bucket)):
+                path = os.path.join(bucket, name)
+                if os.path.isdir(path):
+                    continue
+                if os.path.splitext(name)[1].lower() not in (IMAGE_EXTS | VIDEO_EXTS):
+                    continue
+                app = app_from_filename(name)
+                if app:
+                    plan.append((path, os.path.join(bucket, app), app))
+        if not plan:
+            self.statusBar().showMessage("Aucune capture à regrouper (nom d'appli absent)")
+            return
+        apps = sorted({app for _p, _t, app in plan})
+        if QMessageBox.question(
+                self, "Ranger par appli",
+                f"Ranger {len(plan)} capture(s) dans {len(apps)} dossier(s) ?\n\n"
+                + ", ".join(apps[:12]) + (" …" if len(apps) > 12 else ""),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes) != QMessageBox.StandardButton.Yes:
+            return
+        dup_dir = os.path.join(base, '!duplicate')
+        moved = errors = 0
+        for n, (path, target, app) in enumerate(plan):
+            try:
+                safe_move(path, target, dup_dir=dup_dir)
+                moved += 1
+            except Exception as e:
+                log(f"[APPS] ❌ {os.path.basename(path)}: {e}")
+                errors += 1
+            if n % 50 == 0:
+                self.statusBar().showMessage(f"🗂️ Rangement… {n + 1}/{len(plan)}")
+                QApplication.processEvents()
+        log(f"[APPS] {moved} capture(s) rangée(s) dans {len(apps)} dossier(s) d'appli"
+            + (f", {errors} erreur(s)" if errors else ""))
+        self.statusBar().showMessage(f"🗂️ {moved} capture(s) rangée(s) par appli"
+                                     + (f", {errors} erreur(s)" if errors else ""))
+        self.scan_media()
+
     def save_edits(self):
         self.sync_folders_from_table()
         edits = {info['filename']: info['folder'] for info in self.files if info['folder']}
@@ -3246,6 +3539,9 @@ class TriPhotoWindow(QMainWindow):
         for info in self.files:
             if info['year'] and info['folder']:
                 target = os.path.join(self.base_path, info['year'], info['folder'])
+                if os.path.normcase(os.path.abspath(os.path.dirname(info['filepath']))) == \
+                        os.path.normcase(os.path.abspath(target)):
+                    continue        # already there: leave it alone, keep it listed
                 try:
                     safe_move(info['filepath'], target,
                               dup_dir=os.path.join(self.base_path, '!duplicate'))
@@ -3346,6 +3642,148 @@ class TriPhotoWindow(QMainWindow):
         log(f"--- Auto-organize done: {total} file(s) (Camera root: {c_count}, ScreenRecorder: {r_count}, Pictures: {p_count}) ---")
         self.statusBar().showMessage(f"⚡ {total} fichier(s) rangé(s)")
         self.scan_media()
+
+    # ---------- pCloud import ----------
+
+    def pcloud_root(self):
+        """Folder holding DCIM/ and Pictures/. Configured, or deduced from Camera."""
+        configured = (self.config.get('pcloud_root') or '').strip()
+        if configured:
+            return os.path.normpath(configured)
+        # ...\<root>\DCIM\Camera  ->  ...\<root>
+        return os.path.normpath(os.path.join(self.base_path, '..', '..'))
+
+    def import_pcloud(self, silent=False):
+        r"""Empty the pCloud sync folder into the Camera tree.
+
+        1. Pictures\ : loose media at the root go to Camera\ (sub-folders untouched)
+        2. DCIM\Screenshots and DCIM\ScreenRecorder : every media is filed under
+           Camera\YEAR\!Screenshots_YEAR (or !ScreenRecorder_YEAR), year read from
+           the filename, then EXIF, then the file date
+        3. Emptied sub-folders are removed
+        Duplicates (same name, same size) go to !duplicate, never overwritten."""
+        root = self.pcloud_root()
+        base = self.base_path
+        log("=" * 62)
+        log(f"[PCLOUD] Racine  : {root}")
+        log(f"[PCLOUD] Camera  : {base}")
+        if not os.path.isdir(root):
+            log(f"[PCLOUD] ❌ Racine introuvable, import annulé")
+            return 0
+        if not os.path.isdir(base):
+            log(f"[PCLOUD] ❌ Dossier Camera introuvable, import annulé")
+            return 0
+
+        moved = skipped = errors = 0
+
+        # --- 1. Pictures: root files only, folders left strictly alone ---
+        pictures = os.path.join(root, 'Pictures')
+        if os.path.isdir(pictures):
+            m, s_, e = self.move_media_files(pictures, lambda *_: base, "Pictures")
+            moved += m
+            skipped += s_
+            errors += e
+        else:
+            log(f"[PCLOUD] Pictures: absent ({pictures})")
+
+        # --- 2. DCIM\Screenshots and DCIM\ScreenRecorder, sub-folders included ---
+        dcim = os.path.join(root, 'DCIM')
+        if os.path.isdir(dcim):
+            for entry in sorted(os.listdir(dcim)):
+                kind = DCIM_SPECIAL_FOLDERS.get(entry)
+                if not kind:
+                    continue
+                folder = os.path.join(dcim, entry)
+                if not os.path.isdir(folder) or os.path.normcase(folder) == os.path.normcase(base):
+                    continue
+                m, s_, e = self.move_media_files(
+                    folder,
+                    lambda year, k=kind: os.path.join(base, year, f"!{k}_{year}"),
+                    entry, recursive=True, by_app=True)
+                moved += m
+                skipped += s_
+                errors += e
+                self.remove_empty_dirs(folder, keep_root=True)
+        else:
+            log(f"[PCLOUD] DCIM: absent ({dcim})")
+
+        log(f"[PCLOUD] ✅ {moved} fichier(s) rangé(s)"
+            + (f", {skipped} ignoré(s)" if skipped else "")
+            + (f", {errors} erreur(s)" if errors else ""))
+        log("=" * 62)
+        if not silent:
+            self.statusBar().showMessage(
+                f"📥 Import pCloud : {moved} fichier(s) rangé(s)"
+                + (f", {errors} erreur(s)" if errors else ""))
+        return moved
+
+    def move_media_files(self, source, target_for_year, label, recursive=False,
+                         by_app=False):
+        """Move every media of `source` to target_for_year(year).
+        recursive=False -> root files only (Pictures: its folders stay untouched).
+        Returns (moved, skipped, errors)."""
+        moved = skipped = errors = 0
+        dup_dir = os.path.join(self.base_path, '!duplicate')
+        try:
+            entries = sorted(os.listdir(source))
+        except Exception as e:
+            log(f"[PCLOUD] ❌ Lecture impossible {source}: {e}")
+            return 0, 0, 1
+        for name in entries:
+            path = os.path.join(source, name)
+            if os.path.isdir(path):
+                if recursive and not name.startswith('!'):
+                    m, s_, e = self.move_media_files(path, target_for_year,
+                                                     f"{label}\\{name}", recursive=True,
+                                                     by_app=by_app)
+                    moved += m
+                    skipped += s_
+                    errors += e
+                continue
+            ext = os.path.splitext(name)[1].lower()
+            if ext not in (IMAGE_EXTS | VIDEO_EXTS):
+                log(f"[PCLOUD]    ~ ignoré (extension): {label}\\{name}")
+                skipped += 1
+                continue
+            year = get_year_from_file(name, path)
+            if not year:
+                log(f"[PCLOUD]    ⚠️ année inconnue, laissé sur place: {label}\\{name}")
+                skipped += 1
+                continue
+            target = target_for_year(year)
+            if by_app:
+                # Screenshots carry the app package: group them by app
+                app = app_from_filename(name)
+                if app:
+                    target = os.path.join(target, app)
+            try:
+                dest = safe_move(path, target, dup_dir=dup_dir)
+                where = os.path.relpath(dest, self.base_path)
+                if os.path.normcase(os.path.dirname(dest)) == os.path.normcase(dup_dir):
+                    log(f"[PCLOUD]    ♻️ doublon -> !duplicate: {label}\\{name}")
+                else:
+                    log(f"[PCLOUD]    → {label}\\{name}  ->  {where}")
+                moved += 1
+            except Exception as e:
+                log(f"[PCLOUD]    ❌ {label}\\{name}: {e}")
+                errors += 1
+        return moved, skipped, errors
+
+    def remove_empty_dirs(self, folder, keep_root=True):
+        """Delete the sub-folders left empty after the import"""
+        removed = 0
+        for current, dirs, _files in os.walk(folder, topdown=False):
+            if keep_root and os.path.normcase(current) == os.path.normcase(folder):
+                continue
+            try:
+                if not os.listdir(current):
+                    os.rmdir(current)
+                    log(f"[PCLOUD]    🧹 dossier vide supprimé: "
+                        f"{os.path.relpath(current, folder)}")
+                    removed += 1
+            except OSError:
+                pass
+        return removed
 
     def sort_external_folder(self, source_folder, prefix):
         count = 0
@@ -3595,6 +4033,28 @@ class TriPhotoWindow(QMainWindow):
             self.config['camera_path'] = path
             save_json(CONFIG_FILE, self.config)
             log(f"Camera folder set: {path}")
+
+    def on_pcloud_edited(self):
+        path = self.pcloud_edit.text().strip()
+        self.config['pcloud_root'] = os.path.normpath(path) if path else ''
+        save_json(CONFIG_FILE, self.config)
+        log(f"[PCLOUD] Racine: {self.pcloud_root()}")
+
+    def browse_pcloud(self):
+        folder = QFileDialog.getExistingDirectory(self, "Choisir le dossier pCloud",
+                                                  self.pcloud_root())
+        if folder:
+            self.pcloud_edit.setText(os.path.normpath(folder))
+            self.on_pcloud_edited()
+
+    def on_autoimport_toggled(self, checked):
+        self.config['pcloud_autoimport'] = bool(checked)
+        save_json(CONFIG_FILE, self.config)
+
+    def import_pcloud_now(self):
+        moved = self.import_pcloud()
+        if moved:
+            self.startup_load()
 
     def browse_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Choisir le dossier Camera", self.base_path)
