@@ -1,13 +1,13 @@
-# Interface
-PySide6>=6.5.0
-
 # Images
 pillow>=10.0.0
 pillow-heif>=0.13.0
 
-# Suppression sécurisée / safe deletion
+# Suppression sécurisée (corbeille) / safe deletion
 send2trash>=1.8.0
 
 # Optionnel : embarque ffmpeg si absent du PATH
 # Optional: bundles ffmpeg when it is not on PATH
 # imageio-ffmpeg>=0.4.9
+
+# Ancienne interface Qt (TriPhoto.py) uniquement
+# PySide6>=6.5.0

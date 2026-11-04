@@ -57,3 +57,6 @@ triphoto_edits.json.bak
 # TriPhoto - temp folders created inside the photo folder
 \!temp/
 \!tempvideoscreen/
+
+# TriPhoto web - cache local (vignettes, images vidéo, port du serveur)
+.cache/
