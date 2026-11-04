@@ -49,6 +49,7 @@ DCIM/
 
 # Logs
 *.log
+*.log.old
 
 # TriPhoto - sauvegarde des tags / tag backup
 triphoto_edits.json.bak

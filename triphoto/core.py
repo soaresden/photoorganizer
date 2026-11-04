@@ -84,6 +84,19 @@ def add_log_listener(fn):
     _log_listeners.append(fn)
 
 
+LOG_MAX = 1024 * 1024
+
+
+def rotate_log():
+    """Lines only carry the time: past 1 MB, the log becomes triphoto.log.old
+    (one generation kept), so it never grows without bound."""
+    try:
+        if os.path.getsize(LOG_FILE) > LOG_MAX:
+            os.replace(LOG_FILE, LOG_FILE + '.old')
+    except OSError:
+        pass
+
+
 def log(message):
     line = f"[{datetime.now().strftime('%H:%M:%S')}] {message}"
     with _log_lock:
