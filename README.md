@@ -28,6 +28,43 @@ Quatre onglets, une seule idée : reprendre le contrôle d'un dossier `DCIM/Came
 
 ## Points forts
 
+### Import pCloud automatique
+
+Au lancement, TriPhoto vide le dossier de synchronisation dans l'arborescence Camera :
+
+- `Pictures\` → les médias posés **à la racine** rejoignent Camera. Les sous-dossiers (WhatsApp, Instagram…) ne sont **pas touchés**.
+- `DCIM\Screenshots\` et `DCIM\ScreenRecorder\` → chaque média est classé dans `Camera\ANNÉE\!Screenshots_ANNÉE\` ou `!ScreenRecorder_ANNÉE\`, sous-dossiers compris, puis les dossiers vidés sont supprimés.
+
+L'année est lue dans le nom, sinon dans l'EXIF, sinon dans la date du fichier.
+
+Avant de ranger quoi que ce soit, l'arbre Camera entier est indexé : **si une capture est déjà rangée ailleurs** (par exemple dans un dossier d'événement), c'est l'arrivant qui part dans `!duplicate`, jamais la copie que vous aviez classée. Le journal indique où se trouve celle qui est conservée.
+
+Désactivable par la case « Importer à l'ouverture », ou déclenchable à la demande.
+
+### Captures rangées par application
+
+Les captures Android portent le paquet de l'app en fin de nom. TriPhoto le traduit en nom lisible et crée un sous-dossier par application :
+
+| Nom de fichier | Dossier |
+|---|---|
+| `Screenshot_…_com.whatsapp.jpg` | `WhatsApp` |
+| `Screenshot_…_com.facebook.orca.jpg` | `Messenger` |
+| `Screenshot_…_com.android.vending.jpg` | `Play Store` |
+| `Screenshot_…_com.whatsapp-edit.jpg` | `WhatsApp` *(retouchée sur le téléphone)* |
+| `Screenshot_…_lockscreen.jpg` | `Écran de verrouillage` |
+
+Une table couvre une cinquantaine d'applications courantes ; les autres sont déduites du paquet. Appliqué à l'import, et rétroactivement par le bouton **« 🗂️ Ranger par appli »**.
+
+### Trois périmètres de travail
+
+Les onglets **Doublons** et **Tri** offrent les mêmes boutons radio :
+
+- **📷 Camera** — les dossiers d'événements et les fichiers en vrac
+- **🖼️ Screenshots** — le contenu des `!Screenshots_ANNÉE\`, sous-dossiers compris
+- **🎬 ScreenRecorder** — idem pour les enregistrements d'écran
+
+En mode Screenshots ou ScreenRecorder, la liste des dossiers de destination cumule les dossiers d'événements de l'année **et** les sous-dossiers du vivier (marqués `↳`) : une capture peut rester entre captures ou rejoindre un vrai dossier d'événement.
+
 ### Comparaison de contenu, pas seulement de nom
 
 Deux fichiers qui portent le même nom, ou un suffixe `_1`, ne sont pas forcément identiques. TriPhoto le vérifie sur trois critères :
@@ -148,6 +185,43 @@ Four tabs, one goal: regain control of a `DCIM/Camera` folder that got out of ha
 | **4️⃣ Viewer** | Browses what is already filed as thumbnails, with an interactive timeline |
 
 ## Highlights
+
+### Automatic pCloud import
+
+On startup TriPhoto empties the sync folder into the Camera tree:
+
+- `Pictures\` → media sitting **at the root** move to Camera. Sub-folders (WhatsApp, Instagram…) are **left alone**.
+- `DCIM\Screenshots\` and `DCIM\ScreenRecorder\` → every media is filed under `Camera\YEAR\!Screenshots_YEAR\` or `!ScreenRecorder_YEAR\`, sub-folders included, then emptied folders are removed.
+
+The year is read from the filename, then EXIF, then the file date.
+
+Before filing anything the whole Camera tree is indexed: **if a screenshot is already filed elsewhere** (in an event folder, say), the incoming one goes to `!duplicate` — never the copy you sorted. The log says where the surviving one lives.
+
+Switch it off with the "import on startup" checkbox, or trigger it on demand.
+
+### Screenshots grouped by app
+
+Android screenshots carry the app package at the end of their name. TriPhoto turns it into a readable name and creates one sub-folder per app:
+
+| Filename | Folder |
+|---|---|
+| `Screenshot_…_com.whatsapp.jpg` | `WhatsApp` |
+| `Screenshot_…_com.facebook.orca.jpg` | `Messenger` |
+| `Screenshot_…_com.android.vending.jpg` | `Play Store` |
+| `Screenshot_…_com.whatsapp-edit.jpg` | `WhatsApp` *(edited on the phone)* |
+| `Screenshot_…_lockscreen.jpg` | `Écran de verrouillage` |
+
+A table covers about fifty common apps; the rest are derived from the package. Applied on import, and retroactively through the **"🗂️ Ranger par appli"** button.
+
+### Three working scopes
+
+The **Duplicates** and **Sorting** tabs share the same radio buttons:
+
+- **📷 Camera** — event folders and loose files
+- **🖼️ Screenshots** — the contents of `!Screenshots_YEAR\`, sub-folders included
+- **🎬 ScreenRecorder** — same for screen recordings
+
+In Screenshots or ScreenRecorder mode, the destination list combines the year's event folders **and** the bucket's own sub-folders (marked `↳`): a capture can stay among captures or move out to a real event folder.
 
 ### Content comparison, not just names
 

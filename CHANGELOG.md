@@ -6,6 +6,59 @@ Format : [Semantic Versioning](https://semver.org/)
 
 ---
 
+## [v6.1.0] — 2026-11-04
+
+Import automatique du dossier de synchronisation pCloud, rangement des captures
+par application, et trois périmètres de travail.
+/ Automatic pCloud sync import, screenshots grouped by app, three working scopes.
+
+### ✨ Ajouté / Added
+- **Import pCloud au démarrage** : `Pictures\` (racine seulement, sous-dossiers
+  intouchés) et `DCIM\Screenshots` / `DCIM\ScreenRecorder` (sous-dossiers compris)
+  sont vidés dans `Camera\ANNÉE\`. Dossier configurable, activable/désactivable,
+  déclenchable à la demande. / **pCloud import on startup**, configurable and
+  switchable.
+- **Garde anti-doublon à l'import** : tout l'arbre Camera est indexé (nom + taille)
+  avant de ranger. Si une capture est déjà classée ailleurs, c'est l'arrivant qui
+  part dans `!duplicate` — jamais la copie que vous aviez rangée.
+  / **Import duplicate guard**: the incoming file yields, never the filed copy.
+- **Captures rangées par application** : le paquet Android est traduit en nom
+  lisible (table d'une soixantaine d'applis + déduction), gère les suffixes
+  `-edit` de Xiaomi et les étiquettes `lockscreen`. Appliqué à l'import et
+  rétroactivement via le bouton « 🗂️ Ranger par appli ».
+  / **Screenshots grouped by app**.
+- **Trois périmètres** (Camera / Screenshots / ScreenRecorder) en boutons radio
+  dans les onglets Doublons et Tri. En mode capture, la liste des destinations
+  cumule les dossiers d'événements et les sous-dossiers du vivier.
+  / **Three scopes** as radio buttons in the Duplicates and Sorting tabs.
+- Passage automatique au média suivant après l'assignation d'un dossier.
+  / Auto-advance to the next media after assigning a folder.
+- `restore_screenshots.py` : repêche les captures envoyées par erreur dans
+  `!duplicate`, en vérifiant d'abord qu'elles n'existent pas ailleurs.
+  / Recovery script for screenshots wrongly sent to `!duplicate`.
+
+### 🐛 Corrigé / Fixed
+- **`safe_move()` pouvait envoyer un fichier dans `!duplicate` en le comparant à
+  lui-même** lorsque la destination était son propre dossier — 4059 captures
+  concernées. Le déplacement sur place est désormais refusé, et `apply_moves()`
+  saute explicitement les fichiers déjà à destination.
+  / **`safe_move()` could mistake a file for its own duplicate**.
+- Le scan de doublons ne descendait que d'un niveau : depuis le rangement par
+  appli, il ne voyait plus aucune capture. Les viviers sont parcourus en
+  profondeur. / The duplicate scan only went one level deep.
+- `app_from_filename` ratait `..._com.whatsapp-edit.jpg`, `..._lockscreen.jpg` et
+  les copies `..._1.jpg`. / Three filename shapes were not recognised.
+- La barre des positions vidéo (11 radios) imposait une largeur minimale qui
+  bloquait le séparateur de l'onglet Tri. / The video position bar locked the
+  splitter.
+- Avertissement `SyntaxWarning: invalid escape sequence` sur une docstring.
+
+### 🔧 Modifié / Changed
+- Bouton « ▶️ Lire la vidéo » déplacé en tête de la barre des positions.
+- Séparateurs : poignées à 8 px, minimums explicites, panneaux non repliables.
+
+---
+
 ## [v6.0.0] — 2026-08-04
 
 Réécriture complète de l'interface en **PySide6 (Qt)** et ajout d'un moteur de
