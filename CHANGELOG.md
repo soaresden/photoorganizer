@@ -6,6 +6,25 @@ Format : [Semantic Versioning](https://semver.org/)
 
 ---
 
+## [v7.1.0] — 2026-11-04
+
+### ✨ Ajouté / Added
+- **Thèmes** : Nuit, Plongée, Zelda, Violon (clair), RetroGamer, au choix dans
+  les Réglages, appliqués au clic et mémorisés. Toutes les couleurs, frise
+  comprise, passent désormais par des variables de thème.
+  / **Themes**, picked in the settings.
+
+### 🔧 Modifié / Changed
+- **`Suppr` agit tout de suite et partout** dans l'onglet (aperçu, boutons,
+  panneau de comparaison, filtre des dossiers du Tri), plus seulement quand le
+  tableau a le focus. Confirmation seulement au-delà de 20 fichiers (tout passe
+  par la corbeille). / **Delete** works wherever the focus is; confirms only
+  above 20 files.
+- Doublons : `Suppr` jette la **mauvaise** copie — la Copie 2, ou la Copie 1
+  quand c'est elle le fichier vide. / Delete trashes the bad copy.
+
+---
+
 ## [v7.0.0] — 2026-11-04
 
 Nouvelle interface web : un petit serveur Python local + une interface HTML

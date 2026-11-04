@@ -109,7 +109,20 @@ captures. Si une capture existe déjà (par ex. dans `2023-Isabelle\`),
   lu sur le disque, pas dans le score) : la bibliothèque en contient réellement
   (des captures `2025-DATE`, `2025-SELF`… vides alors que la copie de
   `!Screenshots_2025` est bonne). Sans ça, le lot jetait les bonnes.
-- Côté client, `Suppr` sur une ligne « 1 vide » demande confirmation.
+- `Suppr` envoie `side: 'auto'` : `trash_dup_side(side=None)` jette la Copie 2,
+  ou la Copie 1 quand `kept_copy_empty` (même lecture disque). Un clic explicite
+  sur « Corbeille » de la Copie 2 d'une ligne « 1 vide » demande confirmation.
+- `Suppr` est global à l'onglet (pas seulement le tableau) et ne confirme
+  qu'au-delà de `CONFIRM_ABOVE` (20) fichiers : tout passe par la corbeille.
+
+### Thèmes
+
+Chaque thème ne fait que redéfinir des variables CSS sous `[data-theme="…"]`
+(fin de `app.css`) ; la liste et les pastilles sont dans `THEMES` (`app.js`).
+**Aucune couleur en dur** dans les composants : passer par les variables ou
+`color-mix(in srgb, var(--x) N%, transparent)`, sinon le thème clair (Violon)
+casse. La frise lit ses couleurs avec `getComputedStyle`. Le serveur écrit le
+thème dans `<html data-theme>` (`__THEME__`) pour éviter un flash au démarrage.
 
 ### 6. Tableaux : pas de retri sous les doigts, colonnes réglables
 

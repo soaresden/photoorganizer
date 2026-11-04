@@ -83,11 +83,21 @@ d'événements), **Screenshots** et **ScreenRecorder** (les viviers
 |---|---|
 | `Ctrl` + `1`…`4` | changer d'onglet |
 | lettre (Tri) | filtrer les dossiers ; `↑` `↓` `Entrée` pour assigner |
-| `Suppr` | corbeille — média, ou Copie 2 dans Doublons |
+| `Suppr` | corbeille, tout de suite, où que soit le curseur (même dans le filtre des dossiers). Dans Doublons : la **mauvaise** copie — la Copie 2, ou la Copie 1 si c'est elle qui est vide |
 | `Maj` + `Suppr` | corbeille de la Copie 1 (Doublons) |
 | `F2` | renommer (Visualiseur) · modifier l'année (Tri) |
 | flèches, `Entrée` | naviguer, ouvrir en grand (Visualiseur) |
 | clic droit | ouvrir, révéler dans l'Explorateur, renommer, ignorer… |
+
+Une confirmation n'est demandée qu'au-delà de 20 fichiers : tout passe par la
+corbeille Windows, donc tout se récupère.
+
+### Thèmes
+
+Cinq thèmes dans les Réglages, appliqués au clic : **Nuit** (par défaut),
+**Plongée** (grand bleu, bulles), **Zelda** (forêt, parchemin et or),
+**Violon** (thème clair, bois verni et portées) et **RetroGamer** (néon
+d'arcade, lignes d'écran cathodique).
 
 ### Fichiers
 
@@ -143,8 +153,10 @@ Duplicates and Sorting work on three scopes: **Camera**, **Screenshots** and
 ### Shortcuts
 
 `Ctrl+1…4` tabs · type a letter in Sorting to filter folders, `↑ ↓ Enter` to
-assign · `Delete` recycles (Copy 2 in Duplicates) · `Shift+Delete` recycles
-Copy 1 · `F2` renames · right-click for more.
+assign · `Delete` recycles right away, wherever the focus is (in Duplicates:
+the bad copy — Copy 2, or Copy 1 when it is the empty one) · `Shift+Delete`
+recycles Copy 1 · `F2` renames · right-click for more. Five themes in the
+settings: Nuit, Plongée, Zelda, Violon, RetroGamer.
 
 ---
 
