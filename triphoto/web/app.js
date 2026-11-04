@@ -1468,12 +1468,15 @@ class Timeline {
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.clearRect(0, 0, w, h);
     const mid = Math.round(h / 2) + 4;
-    g.strokeStyle = '#2c3343'; g.lineWidth = 2;
+    const css = getComputedStyle(document.documentElement), tok = k => css.getPropertyValue(k).trim();
+    const C = { line: tok('--line-2'), muted: tok('--muted'), text2: tok('--text-2'), photo: tok('--accent'),
+                video: tok('--accent-2'), cur: tok('--warn'), ring: tok('--text') };
+    g.strokeStyle = C.line; g.lineWidth = 2;
     g.beginPath(); g.moveTo(52, mid); g.lineTo(w - 52, mid); g.stroke();
     g.font = '11px "Segoe UI", sans-serif';
     const [lo, hi] = this.span();
     if (lo == null) {
-      g.fillStyle = '#6f7890'; g.textAlign = 'center';
+      g.fillStyle = C.muted; g.textAlign = 'center';
       g.fillText(this.points.length ? 'Aucune date exploitable' : '', w / 2, mid - 10);
       return;
     }
@@ -1481,28 +1484,28 @@ class Timeline {
     let lastX = -1e9;
     for (const [t, label] of timelineTicks(lo, hi)) {
       const x = this.x(t, lo, hi);
-      g.strokeStyle = '#2c3343'; g.lineWidth = 1;
+      g.strokeStyle = C.line; g.lineWidth = 1;
       g.beginPath(); g.moveTo(x, mid - 7); g.lineTo(x, mid + 7); g.stroke();
-      if (x - lastX > 38) { g.fillStyle = '#6f7890'; g.fillText(label, x, mid - 13); lastX = x; }
+      if (x - lastX > 38) { g.fillStyle = C.muted; g.fillText(label, x, mid - 13); lastX = x; }
     }
     this.points.forEach((p, i) => {
       if (!p.ts || i === this.sel) return;
-      g.fillStyle = p.video ? 'rgba(94,200,255,.85)' : 'rgba(139,124,255,.8)';
+      g.fillStyle = p.video ? C.video : C.photo;
       g.beginPath(); g.arc(this.x(p.ts, lo, hi), mid, 3.6, 0, 7); g.fill();
     });
     if (this.sel >= 0 && this.points[this.sel] && this.points[this.sel].ts) {
       const x = this.x(this.points[this.sel].ts, lo, hi);
-      g.fillStyle = '#ffd479'; g.strokeStyle = '#fff'; g.lineWidth = 1.5;
+      g.fillStyle = C.cur; g.strokeStyle = C.ring; g.lineWidth = 1.5;
       g.beginPath(); g.arc(x, mid, 6.5, 0, 7); g.fill(); g.stroke();
     }
     const n = this.points.filter(p => p.ts).length;
     const days = Math.round((hi - lo) / 864e5);
     const fmt = t => new Date(t).toLocaleDateString('fr-FR') + (days ? '' : ` ${new Date(t).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}`);
-    g.fillStyle = '#aab2c3'; g.textAlign = 'left'; g.fillText(fmt(lo), 6, mid + 24);
+    g.fillStyle = C.text2; g.textAlign = 'left'; g.fillText(fmt(lo), 6, mid + 24);
     g.textAlign = 'right'; g.fillText(fmt(hi), w - 6, mid + 24);
     const real = this.points.filter(p => p.ts).map(p => p.ts);
     const realDays = Math.round((Math.max(...real) - Math.min(...real)) / 864e5);
-    g.textAlign = 'center'; g.fillStyle = '#6f7890';
+    g.textAlign = 'center'; g.fillStyle = C.muted;
     g.fillText(`${n} média(s)${this.yearMode ? ` — année ${new Date(lo).getFullYear()}` : realDays ? ` — ${realDays} jour(s)` : ''}`, w / 2, 14);
   }
 }
@@ -1583,7 +1586,7 @@ const Viewer = {
     const f = norm($('#vw-filter').value.trim());
     const list = this.folders.filter(x => !f || norm(x.name).includes(f));
     $('#vw-folders').innerHTML = list.map(x => `<div class="folder ${x.special ? 'special' : ''} ${x.name === this.folder ? 'hl' : ''}" data-n="${esc(x.name)}" title="${esc(x.name)}">
-      <i style="background:${x.special ? '#3a4152' : hue(x.hue)}"></i><span>${esc(x.name)}</span><small>${x.count || ''}</small></div>`).join('')
+      <i style="background:${x.special ? 'var(--line-2)' : hue(x.hue)}"></i><span>${esc(x.name)}</span><small>${x.count || ''}</small></div>`).join('')
       || '<div class="empty">Aucun dossier</div>';
   },
 
@@ -1817,12 +1820,31 @@ const Lightbox = {
 
 // ============================================================ settings / log / import
 
+// id, name, swatch colours (bg, panel, accent, accent-2) — the CSS lives in app.css
+const THEMES = [
+  ['nuit', 'Nuit', ['#0b0d12', '#151922', '#8b7cff', '#5ec8ff']],
+  ['plongee', 'Plongée', ['#03141c', '#08303f', '#22e3d3', '#3a8dff']],
+  ['zelda', 'Zelda', ['#0d1710', '#1a2b1f', '#d9b44a', '#63c06d']],
+  ['violon', 'Violon', ['#efe5d6', '#fbf7f0', '#9c3f1b', '#c98a2b']],
+  ['retrogamer', 'RetroGamer', ['#08040f', '#190f2e', '#ff2fd0', '#22f0ff']],
+];
+
+function applyTheme(id) {
+  document.documentElement.dataset.theme = id;
+  uiSet('theme', id);
+  if (Viewer.tl) Viewer.tl.draw();
+}
+
 async function openSettings(reason) {
   const st = S.state;
+  const current = document.documentElement.dataset.theme || 'nuit';
+  const themes = `<div class="field" style="margin-bottom:14px"><label>Thème</label><div class="themes">${THEMES.map(([id, name, c]) =>
+    `<button type="button" class="theme-card ${id === current ? 'on' : ''}" data-theme-id="${id}">
+       <div class="sw">${c.map(x => `<i style="background:${x}"></i>`).join('')}</div><span>${name}</span></button>`).join('')}</div></div>`;
   const row = (k, v) => `<span>${k}</span><code>${esc(v || '—')}</code>`;
   const ok = await modal({
     title: 'Réglages', ok: 'Enregistrer', wide: true,
-    body: `${reason ? `<p class="lvl-diff">${esc(reason)}</p>` : ''}
+    body: `${reason ? `<p class="lvl-diff">${esc(reason)}</p>` : ''}${themes}
       <div class="field"><label>Dossier Camera</label><div class="row"><input class="input" id="set-cam" value="${esc(st.camera_path)}"><button class="btn" data-browse="set-cam">Parcourir…</button></div></div>
       <div class="field" style="margin-top:12px"><label>Dossier pCloud</label><div class="row"><input class="input" id="set-pc" value="${esc(st.pcloud_root_raw)}" placeholder="${esc(st.pcloud_root)} (déduit de Camera)"><button class="btn" data-browse="set-pc">Parcourir…</button></div>
         <span class="help">Le dossier qui contient DCIM\\ et Pictures\\. Vide = déduit du dossier Camera.</span></div>
@@ -1830,6 +1852,11 @@ async function openSettings(reason) {
       <div class="status-grid">${row('ffmpeg', st.ffmpeg)}${row('ffprobe', st.ffprobe)}${row('Pillow', st.pil ? 'OK' : 'absent')}${row('HEIC', st.heif ? 'OK' : 'absent (pip install pillow-heif)')}${row('Doublons ignorés', String(st.ignored))}</div>`,
     collect: bd => ({ camera_path: $('#set-cam', bd).value.trim(), pcloud_root: $('#set-pc', bd).value.trim(), pcloud_autoimport: $('#set-auto', bd).checked }),
     mount: bd => {
+      // A theme applies (and is saved) on click, so it can be judged live
+      $$('[data-theme-id]', bd).forEach(b => b.onclick = () => {
+        $$('[data-theme-id]', bd).forEach(x => x.classList.toggle('on', x === b));
+        applyTheme(b.dataset.themeId);
+      });
       $$('[data-browse]', bd).forEach(b => b.onclick = async () => {
         const input = $(`#${b.dataset.browse}`, bd);
         const d = await api('/api/browse', { initial: input.value || st.camera_path, title: 'Choisir un dossier' }).catch(failed);
@@ -1909,6 +1936,18 @@ async function boot() {
       show(['rename', 'dup', 'sort', 'viewer'][+e.key - 1]);
     }
   });
+  // Delete works wherever the focus is in the tab (preview, buttons, compare panel…),
+  // not only on the table. Tables and the grid handle it first and preventDefault.
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Delete' || e.defaultPrevented || e.ctrlKey || e.altKey) return;
+    if ($('.backdrop') || $('#lightbox') || $('.menu')) return;
+    const t = e.target;
+    if (t.closest && t.closest('input, textarea, select, [contenteditable="true"]')) return;
+    const act = { dup: () => Dup.trash(e.shiftKey ? 0 : 'auto'), sort: () => Sort.remove(), viewer: () => Viewer.trash() }[S.view];
+    if (!act) return;
+    e.preventDefault();
+    busy(null, act);
+  });
   if (!S.state.camera_ok) {
     $('#splash').classList.add('gone');
     show(S.ui.view);
@@ -1931,15 +1970,3 @@ async function boot() {
 }
 
 boot();
-  // Delete works wherever the focus is in the tab (preview, buttons, compare panel…),
-  // not only on the table. Tables and the grid handle it first and preventDefault.
-  document.addEventListener('keydown', e => {
-    if (e.key !== 'Delete' || e.defaultPrevented || e.ctrlKey || e.altKey) return;
-    if ($('.backdrop') || $('#lightbox') || $('.menu')) return;
-    const t = e.target;
-    if (t.closest && t.closest('input, textarea, select, [contenteditable="true"]')) return;
-    const act = { dup: () => Dup.trash(e.shiftKey ? 0 : 'auto'), sort: () => Sort.remove(), viewer: () => Viewer.trash() }[S.view];
-    if (!act) return;
-    e.preventDefault();
-    busy(null, act);
-  });

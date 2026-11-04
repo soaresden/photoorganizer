@@ -1539,6 +1539,10 @@ def make_handler(app):
             if path in ('/', '/index.html'):
                 with open(os.path.join(WEB_DIR, 'index.html'), 'r', encoding='utf-8') as f:
                     html = f.read().replace('__TOKEN__', app.token)
+                # Theme baked into the page so the first paint is already right
+                # (localStorage would not survive: the port, hence the origin, changes each launch)
+                theme = str((app.config.get('ui') or {}).get('theme') or 'nuit')
+                html = html.replace('__THEME__', re.sub(r'[^a-z0-9-]', '', theme.lower()) or 'nuit')
                 return self.send_bytes(html.encode('utf-8'), 'text/html; charset=utf-8')
             rel = path.lstrip('/')
             full = os.path.normpath(os.path.join(WEB_DIR, rel))
