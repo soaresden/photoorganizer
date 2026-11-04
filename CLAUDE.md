@@ -169,10 +169,14 @@ Config dans `triphoto_config.json` : `camera_path`, `pcloud_root`,
       (« Companion » pour Home Assistant, « Lappli » pour Société Générale…).
 - [ ] Pas de suite de tests. `core.py` s'importe sans effet de bord : les
       fonctions pures se prêtent directement à des tests unitaires.
-- [ ] Le README n'a pas de capture d'écran ; une vue du visualiseur ferait une
-      bonne vitrine, mais elle montrerait des photos perso (dépôt public).
 
 ### Fait récemment
+
+- Captures du README (`docs/screenshots/`) : faites sur une **photothèque
+  fictive** générée (Pillow), jamais sur la vraie — le dépôt est public. Pour
+  les refaire : serveur lancé avec `TRIPHOTO_DATA` pointant vers une config dont
+  `camera_path` est la démo, et **vérifier `/api/state` avant de capturer** (un
+  `camera_path` absent retombe sur `DEFAULT_CAMERA_PATH`, la vraie photothèque).
 
 - v7.0.0 : passage à l'interface web (`triphoto/`), lanceur `.bat`/`.ps1`,
   README réécrit.

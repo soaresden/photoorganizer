@@ -10,6 +10,10 @@
 
 **[🇫🇷 Français](#-français) · [🇬🇧 English](#-english)**
 
+![Le visualiseur : années, dossiers, vignettes et frise chronologique](docs/screenshots/viewer.png)
+
+<sub>Captures réalisées sur une photothèque fictive : toutes les images sont générées. / Screenshots taken on a fictional library: every picture is generated.</sub>
+
 ---
 
 ## 🇫🇷 Français
@@ -55,6 +59,21 @@ Doublons et Tri travaillent sur trois périmètres au choix : **Camera** (dossie
 d'événements), **Screenshots** et **ScreenRecorder** (les viviers
 `!Screenshots_ANNÉE`, rangés par application).
 
+**Tri des médias** — on tape les premières lettres d'un dossier, `Entrée`, et on
+passe au fichier suivant. Rien ne bouge avant « Appliquer ».
+
+![Tri des médias](docs/screenshots/sort.png)
+
+**Doublons** — la différence entre les deux chemins est surlignée, et le verdict
+vient du contenu : ici deux photos portent le même nom mais n'ont rien à voir.
+
+![Doublons](docs/screenshots/duplicates.png)
+
+**Renommage** — chaque dossier doit commencer par sa date ; ceux rangés dans la
+mauvaise année sont repérés.
+
+![Renommage](docs/screenshots/rename.png)
+
 ### Ce qu'il fait pour vous
 
 - **Import pCloud au démarrage** — `DCIM\Screenshots`, `DCIM\ScreenRecorder` et
@@ -99,6 +118,8 @@ Cinq thèmes dans les Réglages, appliqués au clic : **Nuit** (par défaut),
 **Violon** (thème clair, bois verni et portées) et **RetroGamer** (néon
 d'arcade, lignes d'écran cathodique).
 
+![Thèmes Plongée, Zelda, Violon et RetroGamer](docs/screenshots/themes.png)
+
 ### Fichiers
 
 | Fichier | Contenu |
@@ -138,6 +159,8 @@ browser), `-Shortcut` (desktop shortcut). Video previews need ffmpeg
 | 2 | **Duplicates** | Finds name, suffix (`_1`, `(1)`, `- Copy`…) duplicates and compares their content |
 | 3 | **Sorting** | Assigns loose files to folders, with preview, video playback and keyboard filter |
 | 4 | **Viewer** | Years → folders → thumbnails, timeline, full-screen lightbox |
+
+Screenshots of each tab and of the themes are in the French section above.
 
 Duplicates and Sorting work on three scopes: **Camera**, **Screenshots** and
 **ScreenRecorder** (the `!Screenshots_YEAR` buckets, grouped by app).
