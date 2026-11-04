@@ -1,27 +1,47 @@
 # TriPhoto — contexte pour Claude Code
 
-Organiseur de photos/vidéos en **Python + PySide6**, fichier unique `TriPhoto.py`
-(~3800 lignes). Windows, mono-utilisateur (Denis). Dépôt :
+Organiseur de photos/vidéos. Windows, mono-utilisateur (Denis). Dépôt :
 `https://github.com/soaresden/photoorganizer`.
 
-Session précédente : refonte complète de l'UI Tkinter → Qt, puis une dizaine
-d'itérations sur la fluidité, la détection de doublons et l'import pCloud.
+**Depuis la v7 : serveur Python local + interface HTML** (package `triphoto/`).
+`TriPhoto.py` (Qt, ~3800 lignes) est l'ancienne version : gardée, plus
+développée, mais c'est d'elle que vient toute la logique portée dans `core.py`.
+
+```
+TriPhoto.bat → TriPhoto.ps1   trouve Python, installe les deps, lance pythonw
+                              -m triphoto caché, attend .cache/server.json,
+                              ouvre Edge --app (profil %LOCALAPPDATA%\TriPhoto\AppWindow)
+triphoto/core.py              logique pure, aucun effet de bord à l'import
+triphoto/server.py            App (état + verrous) + handler HTTP, API JSON, SSE
+triphoto/web/                 index.html · app.css · app.js (vanilla, sans build)
+```
 
 ## Lancer / tester
 
 ```powershell
-python TriPhoto.py
+.\TriPhoto.bat -NoImport                    # comme l'utilisateur
+python -m triphoto --port 8799 --no-import  # serveur seul, pour tester
 ```
 
-Les dépendances manquantes sont pip-installées automatiquement au démarrage
-(`ensure_packages()`), **donc ne jamais `import TriPhoto` depuis un script** :
-ça déclenche l'installation et le chargement de Qt. Voir `restore_screenshots.py`
-qui extrait les fonctions dont il a besoin via `ast` sans exécuter le module.
+**Toujours `--no-import` / `-NoImport` en test** : sinon le démarrage vide le
+vrai dossier pCloud dans Camera. Rester en lecture seule sur les vraies données
+(pas de corbeille, pas de déplacement) ; pour tester les écritures, pointer
+`TRIPHOTO_DATA` vers un dossier jetable et `camera_path` vers une copie.
 
-Pas de suite de tests. Vérifier une modif = `python -c "import ast;
-ast.parse(open('TriPhoto.py',encoding='utf-8').read())"` puis test manuel, ou
-extraction des fonctions pures via `ast` dans un script jetable (méthode utilisée
-tout au long de la session précédente).
+- Les POST exigent l'en-tête `X-Token` : il est dans `<meta name="tp-token">`
+  de la page d'accueil.
+- Le serveur s'arrête seul 20 s après la fermeture du dernier client SSE.
+- Le journal est `triphoto.log` ; `.cache/server.json` donne port et pid.
+- **Python du Microsoft Store** : il virtualise `%LOCALAPPDATA%`. C'est pour ça
+  que le cache est dans `ROOT/.cache` et pas sous AppData (ffmpeg n'y voyait
+  pas les fichiers, PowerShell ne voyait pas `server.json`).
+
+Pas de suite de tests. Vérifier une modif = `ast.parse` des `.py`,
+`node --check triphoto/web/app.js`, puis test dans le navigateur. Les fonctions
+de `core.py` s'importent sans danger (`from triphoto import core`).
+
+**Ne jamais `import TriPhoto`** (l'ancien) depuis un script : ça pip-installe et
+charge Qt. `restore_screenshots.py` en extrait des fonctions via `ast`.
 
 ## Arborescence gérée
 
@@ -34,7 +54,7 @@ P:\AutoUpload\Xiaomi 2407FPN8EG\        <- racine pCloud (config: pcloud_root)
 │   │   │   ├── !Screenshots_2023\WhatsApp\
 │   │   │   └── !ScreenRecorder_2023\
 │   │   ├── !duplicate\                 <- doublons, jamais supprimés
-│   │   ├── !temp\ !tempvideoscreen\    <- caches, vidés à la fermeture
+│   │   ├── (!temp\ !tempvideoscreen\)  <- caches de l'ancienne version, purgés au démarrage
 │   ├── Screenshots\  ScreenRecorder\   <- vidés dans Camera à l'ouverture
 └── Pictures\                           <- racine vidée, sous-dossiers INTOUCHÉS
 ```
@@ -51,89 +71,99 @@ P:\AutoUpload\Xiaomi 2407FPN8EG\        <- racine pCloud (config: pcloud_root)
 ## Invariants à ne pas casser
 
 Chacun vient d'un bug réel qui a fait perdre des données. **Les relire avant de
-toucher au tri, aux déplacements ou aux tableaux.**
+toucher au tri, aux déplacements, aux doublons ou aux tableaux.** Les noms entre
+parenthèses renvoient à l'ancien `TriPhoto.py`.
 
-### 1. Jamais de dict Python dans `setData(Qt.ItemDataRole.UserRole, …)`
+### 1. Le serveur détient les données, le client n'envoie que des identifiants
 
-PySide convertit un dict en `QVariantMap` : la relecture renvoie une **copie**.
-Un bug a vidé 149 assignations de dossiers parce que les lignes portaient le dict
-du fichier et que les modifications n'atteignaient jamais `self.files`.
-→ les lignes portent un **entier** (`info['uid']`), résolu via `self.files_by_uid`
-(voir `finfo()`). Les `str`, `int` et listes de `str` passent sans problème.
+(Qt : un dict dans `setData(UserRole)` revenait en **copie** → 149 assignations
+perdues.) Dans la version web, `App.files` est la seule vérité ; le client
+envoie des `uid` / `id`, jamais d'objet fichier à réécrire. Garder ce principe :
+une route qui accepterait un objet complet du client recréerait le bug.
 
-### 2. `safe_move()` refuse de déplacer un fichier sur lui-même
+### 2. `core.safe_move()` refuse de déplacer un fichier sur lui-même
 
 Sans ce garde-fou, un fichier déplacé vers son propre dossier se prenait pour son
 propre doublon et partait dans `!duplicate` — **4059 captures y ont atterri**.
-`apply_moves()` saute aussi explicitement les fichiers déjà à destination.
+`api_sort_apply()` saute aussi explicitement les fichiers déjà à destination.
 
 ### 3. Sauvegarde des tags : jamais de rétrécissement silencieux
 
-`save_edits()` écrit `triphoto_edits.json.bak` si le nouveau contenu est plus
-petit que l'ancien. C'est ce qui a permis de récupérer les 149 tags perdus.
-`sync_folders_from_table()` resynchronise depuis le tableau avant toute écriture
-ou déplacement : **ce qui est à l'écran fait foi**.
+`App.save_edits()` écrit `triphoto_edits.json.bak` si le nouveau contenu est plus
+petit que l'ancien (c'est ce qui a permis de récupérer les 149 tags). Il
+**fusionne** avec les tags des autres sources et n'oublie que les noms déplacés
+ou supprimés (`self.forgotten`). `api_sort_apply()` reçoit la vue du client et
+la resynchronise (`sync_from_view`) avant de déplacer : **ce qui est à l'écran
+fait foi**.
 
 ### 4. Import pCloud : une copie déjà rangée ailleurs n'est jamais doublée
 
-`camera_index()` indexe tout Camera (nom + taille) avant de ranger les captures.
-Si une capture existe déjà (par ex. dans `2023-Isabelle\`), **l'arrivant** part
-dans `!duplicate`, jamais l'inverse.
+`App.camera_index()` indexe tout Camera (nom + taille) avant de ranger les
+captures. Si une capture existe déjà (par ex. dans `2023-Isabelle\`),
+**l'arrivant** part dans `!duplicate`, jamais l'inverse.
 
-### 5. Tri du tableau et largeur de colonnes
+### 5. Doublons : le lot ne jette jamais la seule vraie copie
 
-- `setSortingEnabled(True)` fait **retrier à chaque modification de cellule** et
-  renvoie la vue en haut → le désactiver pendant les mises à jour en masse et
-  restaurer `verticalScrollBar().value()` (voir `assign_folder_to_rows`).
-- Le tri doit être désactivé pendant le remplissage d'un tableau.
-- `ResizeToContents` / `Stretch` empêchent l'utilisateur de régler la largeur →
-  tout est en `Interactive` via `setup_header()`.
-- Colonne Score : `SortableItem` trie sur la valeur numérique, pas sur l'emoji.
+- « Tout traiter » (`auto_rows`) écarte les lignes 🟠/🔴 (`related`/`diff`).
+- Il écarte aussi les lignes dont la **Copie 1 fait 0 octet** (`kept_copy_empty`,
+  lu sur le disque, pas dans le score) : la bibliothèque en contient réellement
+  (des captures `2025-DATE`, `2025-SELF`… vides alors que la copie de
+  `!Screenshots_2025` est bonne). Sans ça, le lot jetait les bonnes.
+- Côté client, `Suppr` sur une ligne « 1 vide » demande confirmation.
 
-### 6. Rien de bloquant dans le thread graphique
+### 6. Tableaux : pas de retri sous les doigts, colonnes réglables
 
-- images décodées dans `PreviewLoader` (QThread, pile LIFO) avec `draft` libjpeg
-- vignettes du visualiseur : `ThumbPool`, 4 QThread, file FIFO annulable
-- comparaison des doublons : `CompareWorker`
-- `stop_*()` ne fait `wait()` **qu'à la fermeture** — un `wait(3000)` dans le flux
-  normal gelait l'UI
-- un `QPixmap` ne se crée que dans le thread GUI ; les workers produisent des
-  `QImage`
+(Qt : `setSortingEnabled` retriait à chaque édition et renvoyait en haut.)
+`VTable` ne retrie **que** sur clic d'en-tête ; une édition ou une suppression
+garde l'ordre et le défilement (`removeKeys` passe la sélection à la ligne
+suivante). Toutes les colonnes restent redimensionnables, largeurs et tris
+sauvés dans la config (`ui`). `.vt-scroll` a `overflow-anchor: none` : sans ça,
+Chrome décalait la vue de 70 px à l'ouverture.
+
+### 7. Rien de bloquant, et deux verrous dans un ordre fixe
+
+- Chaque requête HTTP a son thread. Toute mutation de fichiers prend `App.fs`,
+  les tables en mémoire `App.state_lock` — **toujours `fs` puis `state_lock`**,
+  sinon interblocage.
+- La comparaison des doublons tourne en fond avec un compteur de génération
+  (`compare_gen`) : un nouveau scan annule l'ancien sans `join`.
+- Scores, progression et journal arrivent au client par SSE (`/api/events`).
 
 ## Points d'entrée utiles
 
-| Sujet | Fonction |
+| Sujet | Où |
 |---|---|
-| Import pCloud | `import_pcloud`, `move_media_files`, `camera_index` |
-| Nom d'appli depuis une capture | `app_from_filename`, `APP_NAMES` |
-| Date depuis un nom de fichier | `datetime_from_name`, `file_datetime` |
-| Détection de copies `_1`, `(1)`… | `copy_original_name` |
-| Comparaison de contenu | `fingerprint`, `compare_fingerprints`, `verdict_for` |
-| Surlignage des différences | `diff_path_html`, `_char_diff` |
-| Frise chronologique | `Timeline`, `timeline_ticks` |
+| Import pCloud | `App.import_pcloud`, `move_media_files`, `camera_index` |
+| Nom d'appli depuis une capture | `core.app_from_filename`, `APP_NAMES` |
+| Date depuis un nom de fichier | `core.datetime_from_name`, `file_datetime` |
+| Détection de copies `_1`, `(1)`… | `core.copy_original_name` |
+| Comparaison de contenu | `core.fingerprint`, `compare_fingerprints`, `verdict_for` |
+| Surlignage des différences | `core.diff_path_html` (classes `d-same` / `d-hot` / `d-sep`) |
+| Vignettes, aperçus, images vidéo | `core.thumbnail_file`, `preview_bytes`, `grab_one_shot` |
+| Frise chronologique | `Timeline`, `timelineTicks` dans `app.js` |
+| Tableau virtualisé | `VTable` dans `app.js` |
 
 Config dans `triphoto_config.json` : `camera_path`, `pcloud_root`,
-`pcloud_autoimport`, `ffmpeg_dir`, `columns`, `sorts`.
+`pcloud_autoimport`, `ffmpeg_dir`, `ui` (colonnes, tris, splitters).
 
 ## À faire
 
-- [ ] **La capture du README montre encore l'ancienne interface Tkinter.**
-      À remplacer par une vue de la nouvelle (le visualiseur avec sa frise fait
-      une bonne vitrine). Seul point qui demande une intervention manuelle.
-- [ ] `app_from_filename` : enrichir `APP_NAMES` au fil des paquets rencontrés.
-      La déduction automatique marche, mais donne « Companion » pour Home
-      Assistant ou « Lappli » pour Société Générale tant que le paquet n'est pas
-      dans la table.
-- [ ] Pas de suite de tests. Les fonctions pures (`app_from_filename`,
-      `datetime_from_name`, `copy_original_name`, `timeline_ticks`,
-      `diff_path_html`, `compare_fingerprints`) s'extraient facilement via `ast`
-      et se prêtent bien à des tests unitaires si le besoin se présente.
+- [ ] Fichiers vides (0 octet) dans la bibliothèque : 8 paires dans Doublons où
+      la Copie 1 (dossier d'événement) est vide et la Copie 2 bonne. À régler à
+      la main (`Maj+Suppr`), ou ajouter une action « réparer » qui remplace la
+      copie vide par la bonne.
+- [ ] `app_from_filename` : enrichir `APP_NAMES` au fil des paquets rencontrés
+      (« Companion » pour Home Assistant, « Lappli » pour Société Générale…).
+- [ ] Pas de suite de tests. `core.py` s'importe sans effet de bord : les
+      fonctions pures se prêtent directement à des tests unitaires.
+- [ ] Le README n'a pas de capture d'écran ; une vue du visualiseur ferait une
+      bonne vitrine, mais elle montrerait des photos perso (dépôt public).
 
 ### Fait récemment
 
+- v7.0.0 : passage à l'interface web (`triphoto/`), lanceur `.bat`/`.ps1`,
+  README réécrit.
 - `!duplicate` a été vidé, les 4059 captures sont repêchées et rangées par appli.
-- README et CHANGELOG documentent l'import pCloud, le rangement par appli et les
-  trois périmètres (entrée v6.1.0).
 
 ## Style
 

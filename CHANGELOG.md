@@ -6,6 +6,56 @@ Format : [Semantic Versioning](https://semver.org/)
 
 ---
 
+## [v7.0.0] — 2026-11-04
+
+Nouvelle interface web : un petit serveur Python local + une interface HTML
+ouverte dans une fenêtre d'application Edge, lancée par `TriPhoto.bat`.
+/ New web UI: a small local Python server + an HTML UI in an Edge app window.
+
+### ✨ Ajouté / Added
+- **Package `triphoto/`** : `core.py` (toute la logique, reprise de `TriPhoto.py`
+  avec ses six garde-fous), `server.py` (API JSON, événements en direct),
+  `web/` (interface). / **`triphoto/` package**: core logic, JSON API, web UI.
+- **Lanceur `TriPhoto.bat` → `TriPhoto.ps1`** : trouve Python, installe les
+  dépendances, démarre le serveur sans console, ouvre une fenêtre d'appli dédiée.
+  Options `-NoImport`, `-Browser`, `-Shortcut`. Fermer la fenêtre arrête le
+  serveur. / **Launcher** with options; closing the window stops the server.
+- Tableaux virtualisés : défilement, tri et sélection instantanés quelle que soit
+  la taille. Colonnes redimensionnables, largeurs et tris mémorisés.
+  / Virtualised tables, resizable and remembered columns.
+- Lecture des vidéos directement dans l'aperçu (Tri) et dans la visionneuse
+  plein écran (Visualiseur). / Inline video playback.
+- Visionneuse plein écran avec navigation au clavier, renommage et corbeille.
+  / Full-screen lightbox.
+- Journal, progression et scores de comparaison poussés en direct.
+  / Live log, progress and comparison scores.
+- Raccourcis : `Ctrl+1…4`, filtre de dossiers au clavier dans le Tri,
+  `Maj+Suppr` pour la Copie 1 des doublons. / New keyboard shortcuts.
+- Cache de vignettes persistant (`.cache/thumbs`, purgé au-delà de 2 Go).
+  / Persistent thumbnail cache.
+
+### 🛡️ Sécurité des données / Data safety
+- **Fichiers vides (0 octet)** : verdict explicite « 1 vide » / « 2 vide ». Si la
+  Copie 1 est vide, « Tout traiter » écarte la ligne (il aurait jeté la seule
+  vraie image), et `Suppr` demande confirmation.
+  / **Empty files** are flagged; the batch never trashes the only real copy.
+- Le serveur n'écoute que sur `127.0.0.1`, vérifie l'en-tête `Host` et exige un
+  jeton de session pour toute écriture. Les fichiers servis sont limités à
+  l'arbre Camera, à pCloud et au cache.
+  / Localhost only, Host check, session token, path allow-list.
+- Les tags sont fusionnés plutôt qu'écrasés quand plusieurs actions se
+  croisent ; la garde `.bak` anti-rétrécissement est conservée.
+  / Tags are merged, the anti-shrink `.bak` guard is kept.
+
+### 🔧 Modifié / Changed
+- Les caches `!temp` / `!tempvideoscreen` ne sont plus créés dans Camera :
+  tout va dans `.cache/` à côté du programme (les anciens sont purgés).
+  / Caches moved out of the Camera tree into `.cache/`.
+- `PySide6` n'est plus une dépendance ; `TriPhoto.py` (interface Qt) reste
+  utilisable mais n'évolue plus. / PySide6 dropped; the Qt app is legacy.
+
+---
+
 ## [v6.1.0] — 2026-11-04
 
 Import automatique du dossier de synchronisation pCloud, rangement des captures
