@@ -9,6 +9,8 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const icon = n => `<svg class="i"><use href="#i-${n}"/></svg>`;
 const enc = encodeURIComponent;
+// Everything goes to the Windows recycle bin, so Delete just acts; only a big batch asks first
+const CONFIRM_ABOVE = 20;
 const qs = o => new URLSearchParams(o).toString();
 const hue = (h, s = 58, l = 62) => (h == null ? 'transparent' : `hsl(${h} ${s}% ${l}%)`);
 const norm = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
@@ -696,7 +698,7 @@ const Dup = {
       onSelect: (sel, cur) => { this.updateButtons(sel); this.loadDetailSoon(cur); },
       onContext: (e, sel) => this.menu(e, sel),
       onKey: e => {
-        if (e.key === 'Delete') { e.preventDefault(); this.trash(e.shiftKey ? 0 : 1); }
+        if (e.key === 'Delete') { e.preventDefault(); this.trash(e.shiftKey ? 0 : 'auto').catch(failed); }
       },
       onActivate: () => this.openSide(1),
     });
@@ -853,20 +855,19 @@ const Dup = {
 
   sidePaths(r, side) { return side ? r.p2 : r.p1; },
 
+  /** side 0 = Copie 1, 1 = Copie 2, 'auto' = the bad one (Copie 2, or Copie 1 when it is the empty file) */
   async trash(side) {
     const sel = this.t.selected();
     if (!sel.length) return toast('Sélectionne au moins une ligne', 'warn');
-    if (sel.length > 1) {
-      const n = sel.reduce((a, r) => a + this.sidePaths(r, side).length, 0);
-      const ok = await modal({ title: 'Mettre à la corbeille ?', ok: 'Corbeille', danger: true,
-        body: `La <b>Copie ${side + 1}</b> de ${plural(sel.length, 'ligne')} (${plural(n, 'fichier')}) part dans la corbeille Windows.` });
-      if (!ok) return;
-    }
-    // Copie 1 is a 0-byte file: Copie 2 is then the only real image
-    const otherEmpty = sel.filter(r => r.score && r.score.short === (side === 1 ? '1 vide' : '2 vide'));
+    const auto = side === 'auto';
+    const n = sel.reduce((a, r) => a + this.sidePaths(r, auto ? 1 : side).length, 0);
+    if (n > CONFIRM_ABOVE && !await modal({ title: 'Mettre à la corbeille ?', ok: 'Corbeille', danger: true,
+        body: `${auto ? 'La mauvaise copie' : `La <b>Copie ${side + 1}</b>`} de ${plural(sel.length, 'ligne')} (${plural(n, 'fichier')}) part dans la corbeille Windows.` })) return;
+    // Explicit side only: the other copy is a 0-byte file, so this one is the only real image
+    const otherEmpty = auto ? [] : sel.filter(r => r.score && r.score.short === (side === 1 ? '1 vide' : '2 vide'));
     if (otherEmpty.length && !await modal({ title: 'Jeter la seule vraie copie ?', ok: 'Corbeille quand même', danger: true,
         body: `Pour ${plural(otherEmpty.length, 'ligne')}, l'autre copie est un fichier <b>vide</b> (0 octet) : la Copie ${side + 1} est la seule image réelle.
-          Tu voulais sûrement ${side === 1 ? '<b>Maj+Suppr</b> (jeter la Copie 1)' : '<b>Suppr</b> (jeter la Copie 2)'}.` })) return;
+          <b>Suppr</b> choisit tout seul la bonne copie à jeter.` })) return;
     this.stopSlide();
     const d = await Task.run('Corbeille', () => api('/api/dup/trash', { ids: sel.map(r => r.id), side }));
     d.removed.forEach(id => this.byId.delete(id));
@@ -1136,6 +1137,11 @@ const Sort = {
       filter.value = '';
       this.renderFolders();
       this.t.el.focus();
+    } else if (e.key === 'Delete' && filter.selectionStart === filter.value.length && filter.selectionEnd === filter.value.length) {
+      // Caret at the end: Delete has nothing to erase in the text, so it trashes the
+      // current file, like in the table. Mid-text it still edits the filter.
+      e.preventDefault();
+      busy(null, () => this.remove());
     }
   },
 
@@ -1221,7 +1227,7 @@ const Sort = {
   async remove() {
     const sel = this.t.selected();
     if (!sel.length) return;
-    if (sel.length > 1 && !await modal({ title: 'Mettre à la corbeille ?', ok: 'Corbeille', danger: true,
+    if (sel.length > CONFIRM_ABOVE && !await modal({ title: 'Mettre à la corbeille ?', ok: 'Corbeille', danger: true,
       body: `${plural(sel.length, 'fichier')} part dans la corbeille Windows.` })) return;
     const d = await api('/api/sort/delete', { uids: sel.map(r => r.uid) });
     const gone = new Set(d.deleted);
@@ -1713,7 +1719,7 @@ const Viewer = {
 
   async trash(paths = this.selectedPaths()) {
     if (!paths.length) return;
-    if (paths.length > 1 && !await modal({ title: 'Mettre à la corbeille ?', ok: 'Corbeille', danger: true, body: `${plural(paths.length, 'média')} part dans la corbeille Windows.` })) return;
+    if (paths.length > CONFIRM_ABOVE && !await modal({ title: 'Mettre à la corbeille ?', ok: 'Corbeille', danger: true, body: `${plural(paths.length, 'média')} part dans la corbeille Windows.` })) return;
     const first = Math.min(...[...this.sel]);
     const d = await api('/api/media/trash', { paths });
     const gone = new Set(d.deleted);
@@ -1925,3 +1931,15 @@ async function boot() {
 }
 
 boot();
+  // Delete works wherever the focus is in the tab (preview, buttons, compare panel…),
+  // not only on the table. Tables and the grid handle it first and preventDefault.
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Delete' || e.defaultPrevented || e.ctrlKey || e.altKey) return;
+    if ($('.backdrop') || $('#lightbox') || $('.menu')) return;
+    const t = e.target;
+    if (t.closest && t.closest('input, textarea, select, [contenteditable="true"]')) return;
+    const act = { dup: () => Dup.trash(e.shiftKey ? 0 : 'auto'), sort: () => Sort.remove(), viewer: () => Viewer.trash() }[S.view];
+    if (!act) return;
+    e.preventDefault();
+    busy(null, act);
+  });

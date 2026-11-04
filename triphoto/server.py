@@ -686,14 +686,18 @@ class App:
         return n, errors
 
     def trash_dup_side(self, ids, side):
+        """side 0 = Copie 1, 1 = Copie 2, None = the bad one: Copie 2, unless
+        Copie 1 is the empty file (then Copie 2 is the only real image)."""
         trashed = errors = skipped = 0
-        removed = []
-        key = 'p1' if side == 0 else 'p2'
+        removed, sides = [], set()
         with self.fs:
             for n, i in enumerate(ids):
                 row = self.dup_rows.get(i)
                 if not row:
                     continue
+                s = side if side is not None else (0 if self.kept_copy_empty(row) else 1)
+                sides.add(s)
+                key = 'p1' if s == 0 else 'p2'
                 existing = [p for p in row[key] if os.path.isfile(p)]
                 if not existing:
                     skipped += 1                    # nothing left on disk: stale row
@@ -711,7 +715,11 @@ class App:
                 self.dup_rows.pop(i, None)
                 self.compare_results.pop(i, None)
         self.progress("", 0, -1)
-        msg = f"{trashed} fichier(s) à la corbeille (Copie {side + 1})"
+        msg = f"{trashed} fichier(s) à la corbeille"
+        if len(sides) == 1:
+            msg += f" (Copie {sides.pop() + 1})"
+        elif sides:
+            msg += " (Copie 2, ou Copie 1 quand elle était vide)"
         if skipped:
             msg += f", {skipped} ligne(s) obsolète(s) retirée(s)"
         if errors:
@@ -720,7 +728,9 @@ class App:
         return {'removed': removed, 'trashed': trashed, 'errors': errors, 'msg': msg}
 
     def api_dup_trash(self, body):
-        return self.trash_dup_side([int(i) for i in body.get('ids', [])], int(body.get('side', 1)))
+        side = body.get('side', 1)
+        return self.trash_dup_side([int(i) for i in body.get('ids', [])],
+                                   None if side == 'auto' else int(side))
 
     @staticmethod
     def kept_copy_empty(row):
