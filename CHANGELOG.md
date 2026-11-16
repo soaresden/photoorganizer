@@ -6,6 +6,18 @@ Format : [Semantic Versioning](https://semver.org/)
 
 ---
 
+## [v7.2.0] — 2026-11-16
+
+### ✨ Ajouté / Added
+- **Heure des photos GoPro** : à l'arrivée de fichiers `GOPRO_AAAAMMJJ_HHMMSS_…`
+  non vérifiés (Tri ou Visualiseur), une fenêtre montre la première photo de
+  chaque journée et demande l'heure réelle, avec le dernier décalage validé
+  proposé (+4 h au départ). Le décalage est mémorisé par nom de fichier
+  (`triphoto_clock.json`) et s'applique aux dates, à la frise et à l'année
+  proposée dans le Tri. « Plus tard » repose la question au lancement suivant ;
+  clic droit → « Corriger l'heure GoPro… » pour revenir dessus.
+  / **GoPro clock offset**: asked per new batch, remembered per file.
+
 ## [v7.1.0] — 2026-11-04
 
 ### ✨ Ajouté / Added

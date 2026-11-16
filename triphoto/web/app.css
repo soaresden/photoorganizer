@@ -332,6 +332,17 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; backg
 .modal .body { color: var(--text-2); }
 .modal .body ul { margin: 6px 0 0; padding-left: 18px; max-height: 220px; overflow: auto; }
 .modal .body li { margin: 2px 0; }
+.clock-rows { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; max-height: 50vh; overflow: auto; }
+.clock-row { display: grid; grid-template-columns: 72px 1fr auto; gap: 12px; align-items: center; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: color-mix(in srgb, var(--text) 4%, transparent); }
+.clock-row img { width: 72px; height: 54px; object-fit: cover; border-radius: 5px; background: var(--stage); }
+.clock-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.clock-info > b { color: var(--text); }
+.clock-info > b::first-letter { text-transform: uppercase; }
+.clock-info span { font-size: 12px; color: var(--muted); }
+.clock-set { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.clock-set .input { width: 210px; }
+.clock-off { font-size: 12px; font-weight: 600; color: var(--accent); }
+@media (max-width: 560px) { .clock-row { grid-template-columns: 56px 1fr; } .clock-set { grid-column: 1 / -1; align-items: stretch; } .clock-set .input { width: auto; } }
 .modal .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
 .modal .status-grid { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 12.5px; }
 .modal .status-grid span:nth-child(odd) { color: var(--muted); }

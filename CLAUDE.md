@@ -149,6 +149,7 @@ Chrome décalait la vue de 70 px à l'ouverture.
 | Import pCloud | `App.import_pcloud`, `move_media_files`, `camera_index` |
 | Nom d'appli depuis une capture | `core.app_from_filename`, `APP_NAMES` |
 | Date depuis un nom de fichier | `core.datetime_from_name`, `file_datetime` |
+| Heure GoPro (décalage validé) | `core.GOPRO_RE`, `CLOCK_OFFSETS` · `App.api_clock_set` · `Clock` dans `app.js` |
 | Détection de copies `_1`, `(1)`… | `core.copy_original_name` |
 | Comparaison de contenu | `core.fingerprint`, `compare_fingerprints`, `verdict_for` |
 | Surlignage des différences | `core.diff_path_html` (classes `d-same` / `d-hot` / `d-sep`) |
@@ -158,6 +159,16 @@ Chrome décalait la vue de 70 px à l'ouverture.
 
 Config dans `triphoto_config.json` : `camera_path`, `pcloud_root`,
 `pcloud_autoimport`, `ffmpeg_dir`, `ui` (colonnes, tris, splitters).
+
+### Heure des GoPro
+
+L'horloge de la GoPro de Denis est souvent fausse (au départ : +4 h). Pour
+chaque nouveau fichier `GOPRO_AAAAMMJJ_HHMMSS_…`, l'interface **demande**
+l'heure réelle (une ligne par journée, dernier décalage proposé) : ne jamais
+appliquer un décalage sans validation. Les décalages sont stockés par nom de
+fichier en minuscules dans `triphoto_clock.json` (`files`, `default`) et
+`core.file_datetime` les applique ; les fichiers ne sont pas renommés. Une
+correction après coup (`fix`) ne change pas le `default` proposé aux suivants.
 
 ## À faire
 

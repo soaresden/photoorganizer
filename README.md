@@ -86,6 +86,12 @@ mauvaise année sont repérés.
   Le calcul tourne en fond, la colonne Score se remplit toute seule.
 - **Dates fiables** — lues dans le nom quel que soit le format, puis l'EXIF,
   puis la date du fichier.
+- **Heure des GoPro** — l'horloge d'une GoPro dérive ou se remet à zéro. Pour
+  chaque nouvelle série `GOPRO_AAAAMMJJ_HHMMSS_…`, TriPhoto montre la première
+  photo de chaque journée et demande l'heure réelle, avec le dernier décalage
+  validé proposé (par ex. +4 h). Le décalage est mémorisé par fichier et suit la
+  photo quand elle est rangée ; clic droit → « Corriger l'heure GoPro… » pour
+  le changer. Les fichiers ne sont pas renommés.
 
 ### Garde-fous
 
@@ -127,6 +133,7 @@ d'arcade, lignes d'écran cathodique).
 | `triphoto_config.json` | dossier Camera, racine pCloud, ffmpeg, colonnes |
 | `triphoto_edits.json` | dossiers assignés (sauvegarde auto, `.bak` anti-perte) |
 | `triphoto_ignore.json` | paires de doublons ignorées |
+| `triphoto_clock.json` | décalages d'heure validés pour les photos GoPro |
 | `.cache/` | vignettes (gardées, purgées au-delà de 2 Go) et images vidéo (vidées à la fermeture) |
 
 Tous ignorés par git. `TRIPHOTO_DATA=<dossier>` les place ailleurs, pratique
@@ -161,6 +168,10 @@ browser), `-Shortcut` (desktop shortcut). Video previews need ffmpeg
 | 4 | **Viewer** | Years → folders → thumbnails, timeline, full-screen lightbox |
 
 Screenshots of each tab and of the themes are in the French section above.
+
+GoPro clocks drift: for each new batch of `GOPRO_…` files TriPhoto asks for the
+real time of the first shot of each day, prefilled with the last confirmed
+offset, and remembers it per file.
 
 Duplicates and Sorting work on three scopes: **Camera**, **Screenshots** and
 **ScreenRecorder** (the `!Screenshots_YEAR` buckets, grouped by app).

@@ -1051,6 +1051,7 @@ const Sort = {
     this.t.setRows(this.files, { keep: false });
     if (this.files.length) this.t.selectOnly(0); else this.onSelect([], null);
     this.stats();
+    Clock.check(this.files);
   },
 
   base() { return S.state.camera_path.replace(/[\\/]+$/, ''); },
@@ -1261,6 +1262,7 @@ const Sort = {
       { label: 'Ouvrir', icon: 'external', disabled: !one, action: () => openPath(sel[0].path) },
       { label: 'Afficher dans l’Explorateur', icon: 'folder', disabled: !one, action: () => openPath(sel[0].path, true) },
       { label: 'Corriger l’année…', icon: 'calendar', action: () => this.t.editCurrent('year') },
+      ...(sel.some(r => r.gp) ? [{ label: 'Corriger l’heure GoPro…', icon: 'calendar', action: () => Clock.ask(sel.filter(r => r.gp), true).catch(failed) }] : []),
       { label: 'Retirer le dossier assigné', icon: 'x', action: () => this.assign('').catch(failed) },
       '-',
       { label: `Corbeille${one ? '' : ` (${sel.length})`}`, icon: 'trash', danger: true, action: () => busy(null, () => this.remove()) },
@@ -1609,6 +1611,7 @@ const Viewer = {
     this.sel.clear(); this.cur = -1; this.anchor = -1;
     this.renderGrid();
     $('#vw-grid').scrollTop = 0;
+    Clock.check(this.media);
   },
 
   renderCrumbs() {
@@ -1696,11 +1699,13 @@ const Viewer = {
     const i = +t.dataset.i;
     if (!this.sel.has(i)) this.selectOnly(i);
     const paths = this.selectedPaths(), one = paths.length === 1;
+    const gopro = [...this.sel].map(j => this.media[j]).filter(m => m.gp);
     menu(e, [
       { label: 'Afficher', icon: 'images', disabled: !one, action: () => this.lightbox(i) },
       { label: 'Ouvrir', icon: 'external', action: () => paths.slice(0, 5).forEach(p => openPath(p)) },
       { label: 'Afficher dans l’Explorateur', icon: 'folder', disabled: !one, action: () => openPath(paths[0], true) },
       { label: 'Renommer…', icon: 'rename', disabled: !one, action: () => this.rename().catch(failed) },
+      ...(gopro.length ? [{ label: 'Corriger l’heure GoPro…', icon: 'calendar', action: () => Clock.ask(gopro, true).catch(failed) }] : []),
       '-',
       { label: `Corbeille${one ? '' : ` (${paths.length})`}`, icon: 'trash', danger: true, action: () => busy(null, () => this.trash()) },
     ]);
@@ -1821,6 +1826,92 @@ const Lightbox = {
 // ============================================================ settings / log / import
 
 // id, name, swatch colours (bg, panel, accent, accent-2) — the CSS lives in app.css
+// ====================================================================== camera clock (GoPro)
+// GoPro names carry the camera's own clock, often hours off. Each new batch is
+// shown to the user with the last offset prefilled; nothing is assumed silently.
+const Clock = {
+  asking: false, later: new Set(),
+
+  fmt(off) {
+    if (!off) return 'aucun décalage';
+    const a = Math.abs(off), d = Math.floor(a / 86400), h = Math.floor(a % 86400 / 3600), m = Math.floor(a % 3600 / 60), s = a % 60;
+    const parts = [d && `${d} j`, h && `${h} h`, m && `${pad(m)} min`, s && `${pad(s)} s`].filter(Boolean);
+    return `${off < 0 ? '−' : '+'}${parts.join(' ')}`;
+  },
+  iso: ms => new Date(ms).toISOString().slice(0, 19),
+  parse: v => Date.parse(`${v.length === 16 ? `${v}:00` : v}Z`),
+
+  check(list) {
+    const todo = list.filter(f => f.gp && f.clk == null && !this.later.has(f.name));
+    if (todo.length && !this.asking && !$('.backdrop')) this.ask(todo).catch(failed);
+  },
+
+  async ask(files, fix = false) {
+    if (this.asking) return;
+    this.asking = true;
+    try { await this.dialog(files, fix); } finally { this.asking = false; }
+  },
+
+  async dialog(files, fix) {
+    const def = S.state.clock_default ?? 4 * 3600;
+    // One question per camera day: the clock error is the same for a whole outing
+    const byDay = new Map();
+    [...files].sort((a, b) => (a.gp < b.gp ? -1 : a.gp > b.gp ? 1 : 0)).forEach(f => {
+      const k = f.gp.slice(0, 10);
+      if (!byDay.has(k)) byDay.set(k, []);
+      byDay.get(k).push(f);
+    });
+    const groups = [...byDay.values()].map(g => ({ files: g, raw: Date.parse(`${g[0].gp}Z`), off: fix && g[0].clk != null ? g[0].clk : def }));
+    const day = ms => new Date(ms).toLocaleDateString('fr-FR', { timeZone: 'UTC', weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+    const rows = groups.map((g, i) => {
+      const f = g.files[0];
+      return `<div class="clock-row" data-i="${i}">
+        <img src="${U.thumb(f.path, f.m)}" alt="" title="${esc(f.name)}">
+        <div class="clock-info"><b>${esc(day(g.raw))}</b><span>${plural(g.files.length, 'fichier')} · la GoPro indique <b>${f.gp.slice(11)}</b> pour le premier</span></div>
+        <div class="clock-set"><input type="datetime-local" step="1" class="input" value="${this.iso(g.raw + g.off * 1000)}"><span class="clock-off"></span></div></div>`;
+    }).join('');
+    const res = await modal({
+      title: fix ? 'Corriger l’heure GoPro' : `Heure des photos GoPro (${plural(files.length, 'nouveau fichier', 'nouveaux fichiers')})`,
+      ok: 'Valider', cancel: fix ? 'Annuler' : 'Plus tard', wide: true,
+      body: `<p>La GoPro n’est pas toujours à l’heure. Était-il vraiment l’heure qu’elle indique ? Mets l’heure réelle du premier fichier : le même décalage s’applique à toute la journée.
+        ${fix ? '' : `Proposé : <b>${esc(this.fmt(def))}</b>, le dernier décalage validé.`}</p><div class="clock-rows">${rows}</div>`,
+      mount: bd => $$('.clock-row', bd).forEach(row => {
+        const g = groups[+row.dataset.i], input = $('input', row), out = $('.clock-off', row);
+        const upd = () => { const v = this.parse(input.value); out.textContent = Number.isNaN(v) ? '?' : this.fmt(Math.round((v - g.raw) / 1000)); };
+        input.addEventListener('input', upd);
+        upd();
+      }),
+      collect: bd => {
+        const out = [];
+        for (const row of $$('.clock-row', bd)) {
+          const g = groups[+row.dataset.i], v = this.parse($('input', row).value);
+          if (Number.isNaN(v)) { toast('Heure incomplète', 'warn'); return undefined; }
+          out.push({ names: g.files.map(f => f.name), offset: Math.round((v - g.raw) / 1000) });
+        }
+        return out;
+      },
+    });
+    if (!res) {
+      if (!fix) files.forEach(f => this.later.add(f.name));   // asked again at the next launch
+      return;
+    }
+    const d = await api('/api/clock/set', { groups: res, fix });
+    S.state.clock_default = d.default;
+    const offs = new Map(res.flatMap(g => g.names.map(n => [n, g.offset])));
+    const byUid = new Map(d.files.map(f => [f.uid, f]));
+    if (byUid.size) {
+      Sort.files.forEach(r => { const u = byUid.get(r.uid); if (u) Object.assign(r, u); });
+      Sort.t.refresh();
+      if (Sort.cur && byUid.has(Sort.cur.uid)) Sort.preview(Sort.cur);
+    }
+    files.forEach(f => { if (offs.has(f.name)) f.clk = offs.get(f.name); });
+    if ((Viewer.media || []).some(m => offs.has(m.name))) await Viewer.loadMedia();
+    else Viewer.stale = true;
+    const shifts = [...new Set(res.map(g => g.offset))].map(o => this.fmt(o)).join(', ');
+    toast(`Heure corrigée : ${plural(offs.size, 'fichier')} GoPro (${shifts})`, 'ok');
+  },
+};
+
 const THEMES = [
   ['nuit', 'Nuit', ['#0b0d12', '#151922', '#8b7cff', '#5ec8ff']],
   ['plongee', 'Plongée', ['#03141c', '#08303f', '#22e3d3', '#3a8dff']],

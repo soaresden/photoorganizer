@@ -57,6 +57,7 @@ class App:
         core.resolve_ffmpeg(self.config.get('ffmpeg_dir'))
 
         self.ignore_list = set(core.load_json(core.IGNORE_FILE, []))
+        self.clock = self.load_clock()
         self.imported_once = False
 
         # Sort tab
@@ -158,6 +159,7 @@ class App:
             'scopes': [label for label, _ in core.SCOPES],
             'video_percents': core.VIDEO_PERCENTS,
             'no_import': self.no_import,
+            'clock_default': self.clock['default'],
         }
 
     def api_config(self, body):
@@ -823,6 +825,65 @@ class App:
 
     # ------------------------------------------------------------------ tab 3: sort
 
+    # ------------------------------------------------------------------ camera clock (GoPro)
+
+    @staticmethod
+    def load_clock():
+        data = core.load_json(core.CLOCK_FILE, {})
+        files = {k.lower(): int(v) for k, v in (data.get('files') or {}).items()}
+        clock = {'default': int(data.get('default', core.DEFAULT_CLOCK_OFFSET)), 'files': files}
+        core.CLOCK_OFFSETS.clear()
+        core.CLOCK_OFFSETS.update(files)
+        return clock
+
+    def clock_fields(self, name):
+        """gp: camera-clock time of a GoPro name; clk: confirmed offset, None = to ask"""
+        raw = core.gopro_raw_datetime(name)
+        if raw is None:
+            return {}
+        return {'gp': raw.strftime('%Y-%m-%dT%H:%M:%S'), 'clk': self.clock['files'].get(name.lower())}
+
+    def api_clock_set(self, body):
+        """Record the real time the user confirmed for a batch of GoPro photos.
+        Only names travel: the offset is stored per file name, so it follows the
+        photo when it is filed into an event folder."""
+        updated = []
+        with self.state_lock:
+            for group in body.get('groups', []):
+                try:
+                    offset = int(group.get('offset'))
+                except (TypeError, ValueError):
+                    raise HttpError(400, "Décalage invalide")
+                if abs(offset) > 400 * 86400:
+                    raise HttpError(400, "Décalage invalide")
+                for name in group.get('names', []):
+                    if core.gopro_raw_datetime(name) is None:
+                        continue
+                    self.clock['files'][name.lower()] = offset
+                    core.CLOCK_OFFSETS[name.lower()] = offset
+                # a later fix of an old batch must not change what new batches are offered
+                if not body.get('fix'):
+                    self.clock['default'] = offset
+            names = {n.lower() for g in body.get('groups', []) for n in g.get('names', [])}
+            for info in self.files:
+                if info['filename'].lower() not in names:
+                    continue
+                old_year = str(core.datetime_from_name(info['filename']).year)
+                dt = core.file_datetime(info['filename'], info['filepath'], info['m'])
+                info['ts'] = dt.timestamp()
+                info['dt_text'] = dt.strftime('%Y-%m-%d %H:%M:%S')
+                # a year typed by hand (or given by the folder) is left alone
+                if not self.sort_prefix and info['year'] in ('', old_year):
+                    info['year'] = str(dt.year)
+                updated.append(self.file_out(info))
+            core.save_json(core.CLOCK_FILE, self.clock)
+        for group in body.get('groups', []):
+            off = int(group['offset'])
+            h, rest = divmod(abs(off), 3600)
+            log(f"[HEURE] {len(group.get('names', []))} fichier(s) GoPro : décalage "
+                f"{'-' if off < 0 else '+'}{h} h" + (f" {rest // 60:02d} min" if rest >= 60 else ""))
+        return {'default': self.clock['default'], 'files': updated}
+
     def iter_source_files(self, prefix):
         """(name, path, year, current_subfolder, stat) for the chosen source.
         ''      -> loose files at the root of Camera, year unknown
@@ -858,7 +919,8 @@ class App:
                 'ts': info['ts'], 'dt': info['dt_text'], 'year': info['year'],
                 'folder': info['folder'], 'video': info['ext'] in core.VIDEO_EXTS,
                 'm': info['m'], 'size': info['size'],
-                'hue': core.folder_hue(info['folder']) if info['folder'] else None}
+                'hue': core.folder_hue(info['folder']) if info['folder'] else None,
+                **self.clock_fields(info['filename'])}
 
     def api_sort_files(self, q):
         self.require_base()
@@ -872,11 +934,13 @@ class App:
                 ext = os.path.splitext(name)[1].lower()
                 if ext not in core.MEDIA_EXTS:
                     continue
+                dt = core.file_datetime(name, path, st.st_mtime)
                 year = forced_year
+                if not year and core.CLOCK_OFFSETS.get(name.lower()):
+                    year = str(dt.year)           # the corrected clock may cross New Year
                 if not year:
                     m = re.search(r'(20\d{2})', name)
                     year = m.group(1) if m else (core.get_year_from_file(name, path) or '')
-                dt = core.file_datetime(name, path, st.st_mtime)
                 info = {'uid': self.next_uid, 'filename': name, 'filepath': path, 'ext': ext,
                         'ts': dt.timestamp() if dt.year > 1970 else 0,
                         'dt_text': dt.strftime('%Y-%m-%d %H:%M:%S'),
@@ -1234,7 +1298,7 @@ class App:
             media.append({'name': e.name, 'path': e.path, 'video': ext in core.VIDEO_EXTS,
                           'ts': dt.timestamp() if dt.year > 1970 else 0,
                           'dt': dt.strftime('%d/%m/%Y %H:%M'), 'm': int(st.st_mtime),
-                          'size': st.st_size})
+                          'size': st.st_size, **self.clock_fields(e.name)})
         media.sort(key=lambda m: m['name'].lower())
         return {'media': media, 'subfolders': sorted(subs, key=str.lower)}
 
@@ -1329,6 +1393,7 @@ POST_ROUTES = {
     '/api/folder/rename': 'api_folder_rename',
     '/api/media/rename': 'api_media_rename',
     '/api/media/trash': 'api_media_trash',
+    '/api/clock/set': 'api_clock_set',
 }
 
 

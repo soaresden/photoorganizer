@@ -41,6 +41,7 @@ desktop.ini
 triphoto_config.json
 triphoto_edits.json
 triphoto_ignore.json
+triphoto_clock.json
 
 # Test Data (don't commit personal photos)
 test_data/

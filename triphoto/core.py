@@ -27,6 +27,7 @@ DATA_DIR = os.environ.get('TRIPHOTO_DATA') or ROOT
 CONFIG_FILE = os.path.join(DATA_DIR, 'triphoto_config.json')
 EDITS_FILE = os.path.join(DATA_DIR, 'triphoto_edits.json')
 IGNORE_FILE = os.path.join(DATA_DIR, 'triphoto_ignore.json')
+CLOCK_FILE = os.path.join(DATA_DIR, 'triphoto_clock.json')
 EXCLUSION_FILE = os.path.join(DATA_DIR, 'FolderDoublonExclusion.txt')
 LOG_FILE = os.path.join(DATA_DIR, 'triphoto.log')
 
@@ -218,11 +219,32 @@ def datetime_from_name(filename):
     return None
 
 
+# GoPro photos are named after the camera's own clock, which drifts or resets
+# (battery out, time zone never set). The user confirms the real time of each new
+# batch once; the gap is then applied to every date read from those names.
+GOPRO_RE = re.compile(r'^GOPRO_(20\d{2})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})', re.IGNORECASE)
+DEFAULT_CLOCK_OFFSET = 4 * 3600                   # what Denis's GoPro needed the first time
+CLOCK_OFFSETS = {}                                 # lowercase file name -> seconds, set by the server
+
+
+def gopro_raw_datetime(filename):
+    """Camera-clock timestamp of a GoPro name, or None if it isn't one"""
+    m = GOPRO_RE.match(filename)
+    if not m:
+        return None
+    try:
+        return datetime(*(int(x) for x in m.groups()))
+    except ValueError:
+        return None
+
+
 def file_datetime(filename, filepath, mtime=None):
-    """Shooting date: the name first, the file's mtime as a fallback. Never None."""
+    """Shooting date: the name first, the file's mtime as a fallback. Never None.
+    A confirmed clock offset (GoPro) is applied to the date read from the name."""
     dt = datetime_from_name(filename)
     if dt:
-        return dt
+        offset = CLOCK_OFFSETS.get(filename.lower())
+        return dt + timedelta(seconds=offset) if offset else dt
     try:
         return datetime.fromtimestamp(mtime if mtime is not None else os.path.getmtime(filepath))
     except Exception:
