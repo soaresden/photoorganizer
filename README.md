@@ -119,10 +119,21 @@ corbeille Windows, donc tout se récupère.
 
 ### Thèmes
 
-Cinq thèmes dans les Réglages, appliqués au clic : **Nuit** (par défaut),
-**Plongée** (grand bleu, bulles), **Zelda** (forêt, parchemin et or),
-**Violon** (thème clair, bois verni et portées) et **RetroGamer** (néon
-d'arcade, lignes d'écran cathodique).
+**46 thèmes**, dans le bouton **Thèmes** de la barre de gauche. Un clic essaie
+un thème, « Garder » l'adopte, Échap revient au précédent ; 🎲 en tire un au
+hasard. Ils sont rangés en quatre familles :
+
+- **Sobres** : Nuit (par défaut), Ardoise, AMOLED, Encre, Papier, Clair
+- **Océan & plongée** : Plongée, Abysses, Grands fonds, Récif corallien, Forêt
+  de kelp, Épave, Nudibranche, Hippocampe, Lagon, Cousteau, Tortue
+- **Jeux vidéo** : Zelda, Oracle, Koholint, RetroGamer, Game Boy, GT Bleu,
+  GT Orange, Most Wanted, Underground, Shadow Moses, Codec, Manoir, Anime
+- **Ambiances** : Violon, Moulin Rouge, Glamour, Synthwave, Miami 86,
+  Cyberpunk, Tuning, Voyageur, Câlin, PiliPili, Halloween, Noël, Holi,
+  Coucher de soleil, Lavande, Ambre
+
+Leurs couleurs reprennent celles de mes autres projets (PlongeeJournal,
+MN90Mobile, Bodycount, FuelTrajetMap, les overlays Gran Turismo…).
 
 ![Thèmes Plongée, Zelda, Violon et RetroGamer](docs/screenshots/themes.png)
 
@@ -189,8 +200,8 @@ Duplicates and Sorting work on three scopes: **Camera**, **Screenshots** and
 `Ctrl+1…4` tabs · type a letter in Sorting to filter folders, `↑ ↓ Enter` to
 assign · `Delete` recycles right away, wherever the focus is (in Duplicates:
 the bad copy — Copy 2, or Copy 1 when it is the empty one) · `Shift+Delete`
-recycles Copy 1 · `F2` renames · right-click for more. Five themes in the
-settings: Nuit, Plongée, Zelda, Violon, RetroGamer.
+recycles Copy 1 · `F2` renames · right-click for more. 46 colour themes
+(sober, ocean, video games, moods) under **Thèmes**.
 
 ---
 

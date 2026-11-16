@@ -6,6 +6,16 @@ Format : [Semantic Versioning](https://semver.org/)
 
 ---
 
+## [v7.3.0] — 2026-11-16
+
+### ✨ Ajouté / Added
+- **46 thèmes** (au lieu de 5), tirés des palettes des autres projets :
+  Sobres, Océan & plongée, Jeux vidéo, Ambiances. Nouveau bouton **Thèmes**
+  dans la barre de gauche : galerie avec aperçu miniature, essai au clic,
+  « Garder » / Échap, tirage 🎲 au hasard. / **46 themes** and a theme gallery.
+- `tools/make_themes.py` génère les thèmes depuis 7 couleurs chacun (les
+  autres teintes sont dérivées, les contrastes vérifiés).
+
 ## [v7.2.0] — 2026-11-16
 
 ### ✨ Ajouté / Added

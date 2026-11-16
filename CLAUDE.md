@@ -118,7 +118,12 @@ captures. Si une capture existe déjà (par ex. dans `2023-Isabelle\`),
 ### Thèmes
 
 Chaque thème ne fait que redéfinir des variables CSS sous `[data-theme="…"]`
-(fin de `app.css`) ; la liste et les pastilles sont dans `THEMES` (`app.js`).
+(fin de `app.css`). Nuit, Plongée, Zelda, Violon et RetroGamer sont écrits à
+la main ; les autres sont **générés** par `tools/make_themes.py` (7 couleurs
+par thème, le reste dérivé, contrastes vérifiés) entre les marqueurs
+`@themes:begin` / `@themes:end` d'`app.css` et d'`app.js` (`THEMES`). Pour
+ajouter ou retoucher un thème : modifier la liste `T` du script et le relancer,
+jamais la zone générée à la main.
 **Aucune couleur en dur** dans les composants : passer par les variables ou
 `color-mix(in srgb, var(--x) N%, transparent)`, sinon le thème clair (Violon)
 casse. La frise lit ses couleurs avec `getComputedStyle`. Le serveur écrit le
